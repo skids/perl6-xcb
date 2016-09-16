@@ -284,6 +284,49 @@ our class Font is export {
 
 }
 
+our class Window is export {
+    has Resource $.wid;
+
+    method new(Connection $c, :$map = True, :$depth = 24,
+               :$x = 100, :$y = 100, :$width = 250, :$height = 250,
+               :$border_width = 10,
+               :$class = XProto::WindowClass::InputOutput,
+               :$parent = $c.roots[0].root,
+               :$visual = $c.roots[0].root_visual) {
+        my $wid = Resource.new(:from($c));
+        my %value_list = "16" => 1, "2" => 0x00ffffff, "8" => 0, "2048" => 4325376, "8192",0x20;
+        my $cwrq = CreateWindowRequest.new(
+            :wid($wid.value),
+            :$depth, :$x, :$y, :$width, :$height, :$border_width,
+            :$class, :$parent, :$visual, :%value_list
+        );
+        $cwrq.send($c);
+        $c.flush;
+        # TODO monitor errors
+        if $map {
+            my $mwrq = MapWindowRequest(:window($wid.value));
+            $mwrq.send($c);
+            $c.flush;
+        }
+        # Sanity check
+        my $qtrq = QueryTreeRequest.new(:window($wid.value));
+        my $cookie = $qtrq.send($c);
+        $c.flush;
+        my $qtrp = await($cookie).receive;
+	fail("Error creating window") unless {
+           ($qtrp ~~ QueryTreeReply) and $qtrp.parent == $parent;
+        }
+        self.bless(:$wid);
+    }
+
+    submethod DESTROY {
+        my $dw = DestroyWindowRequest.new(:window($!wid.value));
+        $dw.send($!wid.from);
+    }
+
+}
+
+
 #my class xcb_intern_atom_reply_t is repr("CStruct") {
 #    has uint8 $.response_type;
 #    has uint8 $.pad0_0;
