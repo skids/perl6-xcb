@@ -79,6 +79,8 @@ sub MAIN (:$xmldir? is copy) {
     GetOpcodes($_) for @mods;
     MakeEnums($_) for @mods;
     MakeTypeDefs($_) for @mods;
+    MakeErrors($_) for @mods;
+    MakeErrors2($_) for @mods;
     MakeStructs($_) for @mods;
     MakeReplies($_) for @mods;
     MakeRequests($_) for @mods;
@@ -662,6 +664,134 @@ sub MakeClassDocs($xml, $clname) {
         }
     }
     @doc
+}
+
+my %errorcopies;
+sub MakeErrors($mod) {
+    my @cstructs;
+    my @p6classes;
+    my $oname = $mod.cname eq "xproto" ?? "" !! $mod.modname;
+
+    for $mod.xml.root.elements(:TAG<error>) -> $error {
+        my params $p .= new;
+        my $padnum = -1;
+
+        %errorcopies{$error.attribs<name>.Str} := $p;
+        for $error.elements -> $e {
+            MakeCStructField($p, $e, $padnum);
+        }
+        for $error.elements -> $e {
+            if $error.elements(:TAG<doc>) -> [ $doc ] {
+                 if $doc.elements(:TAG<field>).grep(
+                     {$e.attribs<name>:exists and 
+                      $_.attribs<name> eq $e.attribs<name>}) -> [ $fdoc ] {
+                     my $docstr =
+                         ("#| $_" for $fdoc.cdata».data».Str.lines).join("\n");
+                     $p{$e.attribs<name>}.p_doc = $docstr
+                            if $p{$e.attribs<name>}.p_attr !~~ /^\#/;
+                     $p{$e.attribs<name>}.c_doc = $docstr;
+                 }
+            }
+        }
+    }
+}
+
+sub MakeErrors2($mod) {
+    my @cstructs;
+    my @p6classes;
+    my $oname = $mod.cname eq "xproto" ?? "" !! $mod.modname;
+
+    for (|$mod.xml.root.elements(:TAG<error>),|$mod.xml.root.elements(:TAG<errorcopy>)) -> $error {
+        my params $p;
+        my $padnum = -1;
+
+        if $error.name eq "errorcopy" {
+            $p := %errorcopies{$error.attribs<ref>.Str}
+        }
+        else {
+            $p := %errorcopies{$error.attribs<name>.Str};
+        }
+        my $number = $error.attribs<number>;
+
+        @cstructs.push(qq:to<EOCS>);
+
+                our class cstruct is repr("CStruct") \{
+
+                    has uint8 \$.response_type is rw;
+                    has uint8 \$.error_code is rw;
+                    has uint16 \$.sequence is rw;
+            {({ |(.c_doc, .c_attr) } for $p.params).join("\n").indent(8)}
+
+                    method Hash \{
+                        \{
+                             :sequence\{\$\!sequence},
+            {$p.params».c2p_arg.join(",\n").indent(16)}
+                        }
+                    }
+                    method nativeize(\$p6) \{
+                        \$\!sequence = \$p6.sequence;
+            {$p.params».p2c_init.join("\n").indent(12)}
+                    }
+                };
+                my \$.cstruct = cstruct;
+
+            EOCS
+
+        my $clname = $error.attribs<name>.Str;
+        $clname = $clname.lc.tc if $clname ~~ /^<upper>+$/;
+        %cstructs{$error.attribs<name>} = $clname;
+
+        my $mcode;
+        if not $oname and $error.attribs<name> eq "Request" {
+            $mcode = qq:to<EOMR>;
+                method message_extra \{
+                    "Request 0x" ~ \$.sequence.base(16);
+                }
+            EOMR
+        }
+        else {
+            $mcode = qq:to<EOMV>;
+                method message_extra \{
+                    "Value 0x" ~ \$.bad_value.base(16) ~
+                    ", Request 0x" ~ \$.sequence.base(16);
+                }
+            EOMV
+        }
+
+        my @doc;
+        @doc.append(MakeClassDocs($error, $clname));
+
+        @p6classes.push(qq:to<EO6C>);
+            {@doc.join("\n")}
+            our class {$oname}{$clname}Error does Error[$number] is export(:DEFAULT, :errors) \{
+                my \$.error_code = $number; # without the extension base number
+
+                { @cstructs[*-1] }
+
+                has \$.sequence;
+            {({ |(.p_doc, .p_attr) } for $p.params).join("\n").indent(4)}
+
+                method child_bufs \{
+                    my @bufs;
+            {$p.params».p2c_code.join("\n").indent(8)}
+                    |@bufs;
+                }
+
+                method child_structs(Pointer \$p, \$pstruct,
+                                     Real :\$left! is rw) \{
+                    my @args;
+                    my \$oleft = \$left;
+            {$p.params».c2p_code.join("\n").indent(8)}
+                    |@args;
+                }
+
+            $mcode
+
+            }
+            EO6C
+    }
+    $mod.cstructs.append(@cstructs);
+    $mod.p6classes.append(@p6classes);
 }
 
 # Temporary, to cull TODOP6s
