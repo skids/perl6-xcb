@@ -271,7 +271,7 @@ our class Font is export {
         $of.send($c);
         my $qf = QueryFontRequest.new(:font($fid.value));
         my $p = $qf.send($c);
-        xcb_flush($c.xcb); # Seems to need some encouragement
+        $c.flush; # Seems to need some encouragement
         my $xcbfont = await($p).receive;
         fail("Problem Opening Font") unless $xcbfont ~~ QueryFontReply;
         self.bless(:$fid, :$xcbfont);

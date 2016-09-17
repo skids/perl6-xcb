@@ -123,7 +123,7 @@ class QER
 my $c = X11::Connection.new();
 my $q = ListExtensionsRequest.new;
 my $co = $q.send($c);
-xcb_flush($c.xcb);
+$c.flush;
 my $rep = await $co;
 $rep.list.perl.say;
 }
