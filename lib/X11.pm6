@@ -18,7 +18,6 @@ our class Connection is export {
     has xcb_connection_t $.xcb;
     has $.Setup;
 
-    has $.jiggle_seq;
     has uint32 $!screen = 0;
     has xcb_query_extension_reply_t $!ext; # should never be freed
     has Channel $.cookies = Channel.new();
@@ -67,8 +66,7 @@ our class Connection is export {
     # Passing these as parameters owns their GC link so we can destroy
     # the parent gracefuly.
     my sub wait(Channel $cookies, Channel $destroying,
-                xcb_connection_t $xcb is raw,
-                $jiggle is copy) {
+                xcb_connection_t $xcb is raw) {
 
         use NativeCall;
         constant $null = Pointer.new(0);
@@ -115,7 +113,6 @@ our class Connection is export {
                                 "BUG: This should be impossible.  API changed?");
                         }
                         if $e !== $null {
-                            $jiggle = .promise.sequence;
                             if ($sent.defined) { 
                                 my $c = $responses;
                                 my $e2 = $e;
@@ -130,7 +127,6 @@ our class Connection is export {
                         }
                         elsif $r == $null {
                             # Definitively no more results.
-                            $jiggle = .promise.sequence;
                             if ($sent.defined) {
                                 my $c = $responses;
                                 $sent.then({$c.close;})
@@ -186,7 +182,6 @@ our class Connection is export {
                     elsif ($sent.defined) {
                         my $c = $responses;
                         $sent.then({$c.close});
-                        $jiggle = .promise.sequence;
                         last;
                     }
                     # Nothing yet.  Yield till there might be.
@@ -199,25 +194,12 @@ our class Connection is export {
             }
         }}
     }
-    has $.waiter = wait($!cookies, $!destroying, $!xcb, $!jiggle_seq);
+    has $.waiter = wait($!cookies, $!destroying, $!xcb);
 
     method DESTROY {
         $.res_ask.close;
         $.res_scrap.close;
         $.destroying.send(True);
-    }
-
-    my sub jiggle_polling($xcb) {
-        # You have to jiggle the handle to get polling working.
-        use NativeCall;
-        my sub xcb_get_atom_name (xcb_connection_t $c, uint32 $atom --> uint32)
-            is native("xcb") { }
-        my Pointer $e = nativecast(Pointer, $xcb); # sentry value;
-        my $s = xcb_get_atom_name($xcb, 1);
-        xcb_flush($xcb);
-        xcb_wait_for_reply($xcb, $s, $e);
-        note "Error priming the request/reply pump." if $e != Pointer.new(0);
-        $s;
     }
 
     multi method new (Int $fd!, X11::AuthInfo :$Auth) {
@@ -226,9 +208,8 @@ our class Connection is export {
             xcb_disconnect($xcb);
             fail X::Protocol::XCB.new(:$status);
         }
-        $.jiggle_seq = jiggle_polling($xcb);
 
-        self.bless(:$xcb, :jiggle_seq(jiggle_polling($xcb)));
+        self.bless(:$xcb);
     }
     multi method new (IO $io!, X11::AuthInfo :$Auth) {
         fail "Getting the fd from {$io.perl} NYI"
@@ -243,7 +224,7 @@ our class Connection is export {
             xcb_disconnect($xcb);
             fail X::Protocol::XCB.new(:$status);
         }
-        self.bless(:$xcb, :$screen, :jiggle_seq(jiggle_polling($xcb)));
+        self.bless(:$xcb, :$screen);
     }
     multi method new (Str $Display, X11::AuthInfo :$Auth!) {
         my uint32 $screen;
@@ -253,7 +234,7 @@ our class Connection is export {
             xcb_disconnect($xcb);
             fail X::Protocol::XCB.new(:$status);
         }
-        self.bless(:$xcb, :$screen, :jiggle_seq(jiggle_polling($xcb)));
+        self.bless(:$xcb, :$screen);
     }
     multi method new (*%extra) {
         self.new(Str, |%extra);
