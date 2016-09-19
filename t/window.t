@@ -3,7 +3,7 @@ use lib <blib/lib lib>;
 
 use Test;
 
-plan 5;
+plan 8;
 
 use NativeCall;
 use X11;
