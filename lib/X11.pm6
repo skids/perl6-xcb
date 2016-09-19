@@ -70,6 +70,11 @@ our class Connection is export {
                 xcb_connection_t $xcb is raw,
                 $jiggle is copy) {
 
+        use NativeCall;
+        constant $null = Pointer.new(0);
+
+        # Use xcb handle as a sentry value.
+        my $sentry = nativecast(Pointer, $xcb);
         my $fd = xcb_get_file_descriptor($xcb);
 
         my sub destroy {
@@ -85,25 +90,21 @@ our class Connection is export {
             # Handles destroying when nobody is waiting on a Cookie.
             whenever $destroying { destroy }
             whenever $cookies {
-                use NativeCall;
 
-                # Use xcb handle as a sentry value.
-                my $sentry = nativecast(Pointer, $xcb);
-                my Channel $follow-on;
+                my Channel $responses;
+                my Promise $sent;
                 my $follow-after;
 
                 loop {
+
                     my Pointer $e = $sentry.clone;
                     my Pointer $r = $sentry.clone;
-                    constant $null = Pointer.new(0);
 
                     xcb_flush($xcb);
-                    # Should return immediately since it is for an old reply
-                    xcb_wait_for_reply($xcb, $jiggle, $e);
-                    xcb_flush($xcb);
 
-                    # Use xcb handle as a sentry value.
-                    $e = $sentry.clone;
+                    # This must always be called before xcb_poll_for_reply or
+                    # xcb_poll_for_reply will not work.
+                    xcb_poll_for_event($xcb); # TODO events.
 
                     my $status = xcb_poll_for_reply($xcb, .promise.sequence, $r, $e);
                     if $status {
@@ -115,38 +116,58 @@ our class Connection is export {
                         }
                         if $e !== $null {
                             $jiggle = .promise.sequence;
-                            if ($follow-on) { $follow-on.fail($e) } # TODO encapsulate
-                            else { .break($e) }; # TODO encapsulate
-                            $follow-on = Nil;
+                            if ($sent.defined) { 
+                                my $c = $responses;
+                                my $e2 = $e;
+                                $sent.then({$c.fail($e2)}); # TODO encapsulate
+                            }
+                            else {
+                                my $p = $_;
+                                my $e2 = $e;
+                                start { $p.break($e2) } # TODO encapsulate
+                            }
                             last;
                         }
                         elsif $r == $null {
                             # Definitively no more results.
                             $jiggle = .promise.sequence;
-                            if ($follow-on) { $follow-on.close }
-                            else { .break("No Response") };
+                            if ($sent.defined) {
+                                my $c = $responses;
+                                $sent.then({$c.close;})
+                            }
+                            else {
+                                my $p = $_;
+                                start { $p.break("No Response") }
+                            };
                             last;
                         }
                         else {
-                            if ($follow-on) {
-#                                $follow-after = start { 
-                                    $follow-on.send: .promise.reply_type.new(
-                                        $r, :left(Int), :free
-                                    );
-#                                }
+                            if ($sent.defined) {
+                                my $c = $responses;
+                                my $p = $_;
+                                my $r2 = $r;
+                                $sent .= then(
+                                    {
+                                        $c.send: $p.promise.reply_type.new(
+                                            $r2, :left(Int), :free
+                                        );
+                                    }
+                                );
                             }
                             else {
                                 # We could just build a list but a Channel allows
                                 # multiple workers to respond.  Don't know if there
                                 # are any actual use cases for this, though.
-                                $follow-on = Channel.new;
-#                                start {
-                                    my $rr =  .promise.reply_type.new(
-                                        $r, :left(Int), :free
+                                $responses = Channel.new;
+                                my $c = $responses;
+                                my $p = $_;
+                                my $r2 = $r;
+                                $sent = start {
+                                    $p.keep($c);
+                                    $c.send: $p.promise.reply_type.new(
+                                        $r2, :left(Int), :free
                                     );
-                                    $follow-on.send: $rr;
-                                    .keep($follow-on);
-#                                }
+                                }
                             }
                         }
                     }
@@ -162,17 +183,18 @@ our class Connection is export {
                     # received so we'll never get blocking in the middle
                     # of a string of replies.  So, we can just use state to
                     # figure out what happened.
-                    elsif ($follow-on) {
-                        $follow-on.close;
+                    elsif ($sent.defined) {
+                        my $c = $responses;
+                        $sent.then({$c.close});
                         $jiggle = .promise.sequence;
                         last;
                     }
                     # Nothing yet.  Yield till there might be.
                     # But first check for shutdown
-                    if $destroying.poll { destroy; last } # TODO follow-on
+                    if $destroying.poll { destroy; last } # TODO responses
                     xcb_select_r($fd, 100000);
                     # Were we shutdown while destroying?
-                    if $destroying.poll { destroy; last } # TODO follow-on
+                    if $destroying.poll { destroy; last } # TODO responses
                 }
             }
         }}
@@ -194,7 +216,7 @@ our class Connection is export {
         my $s = xcb_get_atom_name($xcb, 1);
         xcb_flush($xcb);
         xcb_wait_for_reply($xcb, $s, $e);
-        say "Error priming the request/reply pump." if $e ne Pointer.new(0);
+        note "Error priming the request/reply pump." if $e != Pointer.new(0);
         $s;
     }
 

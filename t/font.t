@@ -43,9 +43,13 @@ my $voidwait = start {
     CATCH { default { $broken = 1; .resume } } 
 };
 my $qf = QueryFontRequest.new(:font($fid.value));
-ok await($qf.send($c)).receive.char_infos[*-1] ~~ Charinfo,
+my $p = $qf.send($c);
+$lf = ListFontsRequest.new(:max_names(100), :pattern<*-fixed-*>);
+my $lfc = $lf.send($c);
+$fl = await($lfc).list[0];
+ok $fl ~~ ListFontsReply,
+    "Did a ListFontsRequestwhile QueryFont was building object";
+ok await($p).receive.char_infos[*-1] ~~ Charinfo,
     "Got Font and it has array of Charinfo";
 await $voidwait;
 ok $broken, "OpenFontRequest got a broken cookie";
-
-
