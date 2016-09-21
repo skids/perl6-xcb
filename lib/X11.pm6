@@ -22,6 +22,11 @@ our class Connection is export {
     has xcb_query_extension_reply_t $!ext; # should never be freed
     has Channel $.cookies = Channel.new();
     has Channel $.destroying = Channel.new();
+    #| Extension base value followed by Error code to type maps from
+    #| said extension, pre-sorted by descending base value.
+    has $.error_bases is rw = [ 0, $X11::XCB::XProto::errorcodes ];
+    #| Lock for preventing simultaneous access to $.error_bases
+    has Lock $.error_bases_lock = Lock.new();
 
     method flush { xcb_flush($!xcb) }
 
@@ -66,7 +71,8 @@ our class Connection is export {
     # Passing these as parameters owns their GC link so we can destroy
     # the parent gracefuly.
     my sub wait(Channel $cookies, Channel $destroying,
-                xcb_connection_t $xcb is raw) {
+                xcb_connection_t $xcb is raw,
+                $error_bases, $error_bases_lock) {
 
         use NativeCall;
         constant $null = Pointer.new(0);
@@ -74,6 +80,7 @@ our class Connection is export {
         # Use xcb handle as a sentry value.
         my $sentry = nativecast(Pointer, $xcb);
         my $fd = xcb_get_file_descriptor($xcb);
+        my %errors;
 
         my sub destroy {
             while $cookies.poll -> $v {
@@ -82,6 +89,21 @@ our class Connection is export {
             $cookies.close;
             $destroying.close;
             xcb_disconnect($xcb);
+        }
+
+        my sub error_to_exception($err) {
+            return Nil unless $err.defined;
+            my $left = Inf;
+            #TODO extension subclasses
+            my $res = RequestError.subclass(nativecast(Pointer,$err),
+                                            :$error_bases, :$error_bases_lock,
+                                            :$left, :free);
+            use X::Protocol::X11;
+            X::Protocol::X11.new(:status($res.error_code),
+                                 :sequence($res.sequence),
+                                 :major_opcode($res.major_opcode),
+                                 :minor_opcode($res.minor_opcode),
+                                 :bad_value($res.bad_value));
         }
 
         start { CATCH { $_.say }; react {
@@ -101,8 +123,26 @@ our class Connection is export {
                     xcb_flush($xcb);
 
                     # This must always be called before xcb_poll_for_reply or
-                    # xcb_poll_for_reply will not work.
-                    xcb_poll_for_event($xcb); # TODO events.
+                    # xcb_poll_for_reply will not work. :-/
+                    my $ev = xcb_poll_for_event($xcb);
+                    if $ev {
+                        my class gev is repr("CStruct") {
+                           has uint8 $.response_type;
+                           has uint8 $.code;
+                           has uint16 $.seq;
+                        }
+                        my $gev = nativecast(gev, $ev);
+                        if $gev.response_type eq 0 {
+                           # An error.  Despite what the API docs say it
+                           # can indeed be for an event we requested without the
+                           # checked flag set, maybe even this one.  Add it to the
+                           # list, which is protected via the whenever.
+                           %errors{$gev.seq} = $ev;
+                        }
+                        elsif $gev.response_type eq 2 {
+                           # TODO events
+                        }
+                    }
 
                     my $status = xcb_poll_for_reply($xcb, .promise.sequence, $r, $e);
                     if $status {
@@ -113,27 +153,43 @@ our class Connection is export {
                                 "BUG: This should be impossible.  API changed?");
                         }
                         if $e !== $null {
+                            # This will probably never happen given the proclivity
+                            # of this API to send all events above.
                             if ($sent.defined) { 
                                 my $c = $responses;
                                 my $e2 = $e;
-                                $sent.then({$c.fail($e2)}); # TODO encapsulate
+                                $sent.then({
+                                    my $ev = error_to_exception($e2);
+                                    $c.fail($ev === Any ?? $e2 !! $ev)
+                                });
                             }
                             else {
                                 my $p = $_;
                                 my $e2 = $e;
-                                start { $p.break($e2) } # TODO encapsulate
+                                start {
+                                    my $ev = error_to_exception($e2);
+                                    $p.break($ev === Any ?? $e2 !! $ev)
+                                }
                             }
                             last;
                         }
                         elsif $r == $null {
                             # Definitively no more results.
                             if ($sent.defined) {
+                                my $ev = %errors{.promise.sequence +& 0xffff}:delete;
                                 my $c = $responses;
-                                $sent.then({$c.close;})
+                                $sent.then({
+                                    $ev = error_to_exception($ev);
+                                    $ev === Any ?? $c.close !! $c.fail($ev);
+                                })
                             }
                             else {
+                                my $ev = %errors{.promise.sequence +& 0xffff}:delete;
                                 my $p = $_;
-                                start { $p.break("No Response") }
+                                start {
+                                    $ev = error_to_exception($ev);
+                                    $p.break($ev === Any ?? "No Response" !! $ev);
+                                }
                             };
                             last;
                         }
@@ -194,7 +250,7 @@ our class Connection is export {
             }
         }}
     }
-    has $.waiter = wait($!cookies, $!destroying, $!xcb);
+    has $.waiter = wait($!cookies, $!destroying, $!xcb, $!error_bases, $!error_bases_lock);
 
     method DESTROY {
         $.res_ask.close;
@@ -293,7 +349,7 @@ our class Window is export {
     method new(Connection $c, :$map = True, :$depth = 24,
                :$x = 100, :$y = 100, :$width = 250, :$height = 250,
                :$border_width = 10,
-               :$class = XProto::WindowClass::InputOutput,
+               :$class = X11::XCB::XProto::WindowClass::InputOutput,
                :$parent = $c.roots[0].root,
                :$visual = $c.roots[0].root_visual) {
         my $wid = Resource.new(:from($c));

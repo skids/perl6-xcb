@@ -50,6 +50,7 @@ class mod {
     has @.cstructs is rw;
     has @.p6classes is rw;
     has %.opcodes is rw;
+    has %.errors is rw;
 }
 
 # Keep track of XML coverage during devel.
@@ -113,7 +114,7 @@ sub MakeMod ($xml) {
     }
 
     my $prologue = qq:to<EOP>;
-        unit module $modname;
+        unit module X11::XCB::$modname;
 
         use NativeCall;
         use X11::XCB :internal :DEFAULT;
@@ -724,7 +725,7 @@ sub MakeErrors2($mod) {
 
                     method Hash \{
                         \{
-                             :sequence\{\$\!sequence},
+                            :sequence(\$\!sequence),
             {$p.params».c2p_arg.join(",\n").indent(16)}
                         }
                     }
@@ -739,6 +740,7 @@ sub MakeErrors2($mod) {
 
         my $clname = $error.attribs<name>.Str;
         $clname = $clname.lc.tc if $clname ~~ /^<upper>+$/;
+        $mod.errors{$number} = $oname ~ $clname ~ "Error";
         %cstructs{$error.attribs<name>} = $clname;
 
         my $mcode;
@@ -1097,7 +1099,7 @@ sub MakeRequests($mod) {
                              {$isvoid.gist}]
                 is export(:DEFAULT, :replies) \{
 
-                my \$.reply = { $isvoid ?? "Nil" !! $clname ~ "Reply" };
+                my \$.reply{ $isvoid ?? ";" !! " = " ~ $clname ~ "Reply" ~ ";" }
 
                 { @cstructs[*-1] }
 
@@ -1133,6 +1135,13 @@ sub Output ($mod) {
     $out.print($mod.enums.join);
     $out.print($mod.typedefs.join);
     $out.print($mod.p6classes.grep({$_ !~~ /TODOP6/}).join);
+    $out.print(qq:to<EOEH>);
+        our \$errorcodes = :\{
+        { (for $mod.errors.sort(+*.key) {
+              $_.key ~ " => " ~ $_.value
+           }).join(",\n").indent(4) }
+        };
+        EOEH
     say($mod.p6classes.grep({$_ ~~ /TODOP6/}).join);
     $out.close;
 }

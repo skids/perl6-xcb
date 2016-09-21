@@ -218,8 +218,8 @@ class xcb_protocol_request_t is repr("CStruct") is export(:internal) {
 };
 
 enum xcb_send_request_flags <<
-    :XCB_REQUEST_CHECKED(0) XCB_REQUEST_RAW
-    XCB_REQUEST_DISCARD_REPLY :XCB_REQUEST_REPLY_FDS(4)
+    :XCB_REQUEST_CHECKED(1) :XCB_REQUEST_RAW(2)
+    :XCB_REQUEST_DISCARD_REPLY(4) :XCB_REQUEST_REPLY_FDS(8)
 >>;
 
 sub xcb_send_request(xcb_connection_t $c, int32 $flags, xcb_iovec $vector,
@@ -258,7 +258,6 @@ class Cookie is Promise {
     has uint64 $.sequence;
     has $.reply_type;
 }
-
 
 our role Error[$error_code] is export(:internal) {
 
@@ -311,6 +310,40 @@ our role Error[$error_code] is export(:internal) {
 
     method error_code($c) {
         $error_code; # XXX need to add extension base
+    }
+
+    #| Find the appropriate subclass based on error codes.
+    #| This is more a method of the role group than of any
+    #| parameterization.  Takes a (positional) pointer to a raw protocol
+    #| packet containing an error, a :error_bases array containing a list
+    #| of alternating error base values and errorcode maps, and an
+    #| associated :error_bases_lock to serialize access.  An lvalue :length to
+    #| prevent buffer overruns must be supplied (but can be Inf).
+    #| This will be altered based on the encountered structure.
+    #| Finally is :!free is not passed the raw protocol packet will
+    #| be freed.
+    method subclass (Pointer $p, :$error_bases!, :$error_bases_lock!,
+                     :$left! is rw, :$free = True) {
+
+        my class errorstub is repr("CStruct") {
+            has uint8 $!reponse_type;
+            has uint8 $.error_code;
+        }
+        die "Packet too short" unless $left >= nativesizeof(errorstub);
+        my $code = nativecast(errorstub, $p).error_code;
+        my $cl;
+        $error_bases_lock.protect: {
+            for |$error_bases -> $k, $v {
+                next if $k > $code;
+                if $v{$code - $k}:exists {
+                    $cl = $v{$code - $k};
+                    last;
+                }
+            }
+        }
+        die "TODO/FIXME: unknown error code or extensions NYI"
+            if $cl === Any;
+        $cl.new($p, :$left, :$free);
     }
 }
 
