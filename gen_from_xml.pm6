@@ -293,11 +293,50 @@ sub MakeImports($for, @mods) {
     $for.prologue ~= $res;
 }
 
+multi sub build_op($f where {.name eq "op"}) {
+    return "TODOP6 XXX" if $f.elements.elems != 2;
+    my $p6op = do given $f.attribs<op> {
+        when '+'|'-'|'*'|'|' { $_ }
+        when '&' { '+&' }
+        when '/' { 'div' }
+        default { "TODOP6 $_" }
+    }
+    "(" ~ build_op($f.elements[0]) ~ " $p6op "
+        ~ build_op($f.elements[1]) ~ ")";
+}
+
+multi sub build_op($f where {.name eq "unop"}) {
+    return "TODOP6 XXX" if $f.elements.elems != 1;
+    my $p6op = do given $f.attribs<op> {
+        when '~' { '+^' }
+        default { "TODOP6 $_" }
+    }
+    "($p6op" ~ build_op($f.elements[0]) ~ ")";
+}
+
+multi sub build_op($f where {.name eq "fieldref"}) {
+    '$pstruct.' ~ $f.contents.Str;
+}
+
+multi sub build_op($f where {.name eq "value"}) {
+    $f.contents.Str;
+}
+
+sub build_equation($f) {
+   return "Not one root op" if $f.elements».name.join(" ") ne any <op unop>;
+   build_op($f.elements[0]);
+}
+
 my %cstructs;
-sub MakeCStructField(params $p, $f, $padnum is rw, $rw = " is rw") {
+sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is rw") {
     given $f.name {
         when "field"|"exprfield" {
-            # TODO fixed fields in the middle of dynamic structs
+            if $found_list {
+                ++$TODOP6;
+                $p{$TODOP6}.c_attr = "# $TODOP6: fixed field between dynamic lists";
+                $p{$TODOP6}.p_attr = "# $TODOP6: fixed field between dynamic lists";
+                succeed;
+            }
             my $name = $f.attribs<name>;
             my $type = $f.attribs<type>;
             my $has = "has";
@@ -338,6 +377,12 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $rw = " is rw") {
                 $p{$TODOP6}.p_attr = "# $TODOP6: alignpad";
                 succeed;
             }
+            if $found_list {
+                ++$TODOP6;
+                $p{$TODOP6}.c_attr = "# $TODOP6: pad between dynamic lists";
+                $p{$TODOP6}.p_attr = "# $TODOP6: pad between dynamic lists";
+                succeed;
+            }
             $padnum++;
             (for 0..^$f.attribs<bytes> {
                 given "pad{$padnum}_$_" {
@@ -347,6 +392,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $rw = " is rw") {
             }).join(" ");
         }
         when "list" {
+            $found_list++;
             if $f.attribs<name> ~~ /^alignment_pad/ {
                 my $align = 4;
                 # Map String directly to Perl6 Str
@@ -367,12 +413,70 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $rw = " is rw") {
                     }
                     EOPC
             }
-            # Handle only a single value or a single fieldref for now
             elsif +$f.elements and
-               $f.elements».name.join(" ") ne any <fieldref value> {
-                $TODOP6++;
-                $p{$TODOP6}.c_attr = "# $TODOP6 complicated $_";
-                $p{$TODOP6}.p_attr = "# $TODOP6 complicated $_";
+                $f.elements».name.join(" ") ne any <fieldref value> {
+                my $eq = build_equation($f);
+                if ($eq ~~ /TODOP6/) {
+                    $TODOP6++;
+                    $p{$TODOP6}.c_attr = "# $TODOP6 complicated $_ ($eq) of {$f.attribs<type>}";
+                    $p{$TODOP6}.p_attr = "# $TODOP6 complicated $_ ($eq) of {$f.attribs<type>}";
+                }
+                elsif $f.attribs<type> eq "char" {
+
+                    my $name = $f.attribs<name>;
+                    my $type = $f.attribs<type>;
+
+                    if $eq ~~ /pstruct\.<!before length<!alpha>>/ {
+                        $TODOP6++;
+                        $p{$name}.c_attr = "# Dynamic layout: {$type}s $TODOP6 fields other than .length";
+                    } else {
+                        $p{$name}.c_attr = "# Dynamic layout: {$type}s";
+                    }
+                    $p{$name}.p_attr = "has \$.$name is rw;";
+                    $p{$name}.p2c_code = qq:to<EOCC>;
+                    given \$\.{$name}.encode('utf8') \{
+                        if .elems \{ \@bufs.push(Blob.new(\$_.values)) }
+                    }
+                    EOCC
+                    $p{$name}.c2p_code = qq:to<EOPC>;
+                    \$left -= $eq;
+                    die("Short packet")
+                        unless \$left >= 0;
+                    @args.append: "$name",
+                        (Buf.new(nativecast(CArray[uint8], \$p)[^$eq]
+                        ).decode("utf8"));
+                    EOPC
+                }
+                elsif %cstructs{$f.attribs<type>} -> $pt {
+                    my $name = $f.attribs<name>;
+                    my $type = $f.attribs<type>;
+
+                    if $eq ~~ /pstruct\.<!before length<!alpha>>/ {
+                        $TODOP6++;
+                        $p{$name}.c_attr = "# Dynamic layout: {$type}s $TODOP6 fields other than .length";
+                    } else {
+                        $p{$name}.c_attr = "# Dynamic layout: {$type}s";
+                    }
+                    $p{$name}.p_attr = "has \@.$name is rw;";
+                    $p{$name}.p2c_code = qq:to<EOCC>;
+                        \@bufs.push(\$_.bufs) for \$.$name;
+                        EOCC
+                    $p{$name}.c2p_code = qq:to<EOPC>;
+                    @args.append:
+                        "$name",
+                        (for 0..^$eq \{
+                                # XXX no assurance pointer math will not start adding by sizeof
+                                $pt\.new(Pointer.new(\$p + \$oleft - \$left),
+                                         :\$left, :!free);
+                            }
+                        );
+                    EOPC
+                }
+                else {
+                    $TODOP6++;
+                    $p{$TODOP6}.c_attr = "# $TODOP6 NYI $_";
+                    $p{$TODOP6}.p_attr = "# $TODOP6 NYI $_";
+                }
             }
             elsif $f.elements(:TAG<value>) -> [ $val ] {
                 my $frval = $val.contents.Str.Int;
@@ -676,10 +780,11 @@ sub MakeErrors($mod) {
     for $mod.xml.root.elements(:TAG<error>) -> $error {
         my params $p .= new;
         my $padnum = -1;
+        my $found_list = 0;
 
         %errorcopies{$error.attribs<name>.Str} := $p;
         for $error.elements -> $e {
-            MakeCStructField($p, $e, $padnum);
+            MakeCStructField($p, $e, $padnum, $found_list);
         }
         for $error.elements -> $e {
             if $error.elements(:TAG<doc>) -> [ $doc ] {
@@ -812,9 +917,10 @@ sub MakeStructs($mod) {
         my $padnum = -1;
         my @reqfields;
         my params $p .= new;
+        my $found_list = 0;
 
         for $struct.elements -> $e {
-            MakeCStructField($p, $e, $padnum);
+            MakeCStructField($p, $e, $padnum, $found_list);
         }
         for $struct.elements -> $e {
             if $struct.elements(:TAG<doc>) -> [ $doc ] {
@@ -930,13 +1036,14 @@ sub MakeReplies($mod) {
             my $padnum = -1;
             my @reqfields;
             my params $p .= new;
+            my $found_list = 0;
 
             state $two = 1;
             die "Two replies for request" if $two > 1;
             $two++;
 
             for $rep.elements -> $e {
-                MakeCStructField($p, $e, $padnum);
+                MakeCStructField($p, $e, $padnum, $found_list);
             }
             for $rep.elements -> $e {
                 if $rep.elements(:TAG<doc>) -> [ $doc ] {
@@ -1031,9 +1138,13 @@ sub MakeRequests($mod) {
         my $padnum = -1;
         my @reqfields;
         my params $p .= new;
+        my $found_list = 0;
+
+        # We use the core API for this
+        next if $req.attribs<name> eq "SetupAuthenticate";
 
         for $req.elements -> $e {
-            MakeCStructField($p, $e, $padnum);
+            MakeCStructField($p, $e, $padnum, $found_list);
         }
         for $req.elements -> $e {
             if $req.elements(:TAG<doc>) -> [ $doc ] {
