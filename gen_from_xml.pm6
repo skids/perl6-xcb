@@ -117,7 +117,7 @@ sub MakeMod ($xml) {
         unit module X11::XCB::$modname;
 
         use NativeCall;
-        use X11::XCB :internal :DEFAULT;
+        use X11::XCB :internal, :DEFAULT;
         EOP
 
     if $extension {
@@ -131,8 +131,8 @@ sub MakeMod ($xml) {
         $prologue ~= qq:to<EOE>;
 
             # Provide a way to cheese around lots of enums using these
-            constant None is export(:internal :enums) = 0;
-            constant Success is export(:internal :enums) = 0;
+            constant None is export(:internal, :enums) = 0;
+            constant Success is export(:internal, :enums) = 0;
 
             EOE
     }
@@ -167,13 +167,13 @@ sub MakeTypeDefs ($mod) {
         $t = %nctypemap{$t} = $t ~ "ID";
         %nctypemap{$t} = "uint32";
         $mod.typedefs.push: "constant $t" ~
-            " is export(:internal :ctypes) = uint32;\n";
+            " is export(:internal, :ctypes) = uint32;\n";
     }
     for $mod.xml.root.elements(:TAG<typedef>) -> $e {
         %nctypemap{$e.attribs<newname>} = $e.attribs<oldname>;
         my $t = NCtype($e.attribs<oldname>);
         $mod.typedefs.push: "constant {$e.attribs<newname>}" ~
-            " is export(:internal :ctypes) = $t;\n";
+            " is export(:internal, :ctypes) = $t;\n";
     }
 }
 
@@ -197,7 +197,7 @@ sub MakeEnums ($mod) {
     # Keep some things in their own namespace rather than munging them
     my sub fix_export($enum) {
         my @elements = $enum.elements(:TAG<item>);
-        my @res = " is export(:DEFAULT :internal)", " is export(:enums)";
+        my @res = " is export(:DEFAULT, :internal)", " is export(:enums)";
 
         # Perl6 things that can be overidden, but avoid surprises
         # TODOP6: will have to go look for more of these pre-publication
@@ -289,7 +289,7 @@ sub MakeImports($for, @mods) {
     my $res = "";
     for @imports -> $cname {
         my $from = @mods.first(*.cname eq $cname.contents);
-        $res ~= "use X11::XCB::$from.modname() :internal :DEFAULT;\n";
+        $res ~= "use X11::XCB::$from.modname() :internal, :DEFAULT;\n";
     }
     $for.prologue ~= $res;
 }
