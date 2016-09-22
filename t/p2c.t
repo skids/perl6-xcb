@@ -3,11 +3,17 @@ use lib <blib/lib lib>;
 
 use Test;
 
-plan 12;
+plan 116;
 
 use NativeCall;
 use X11::XCB;
 use X11::XCB::XProto;
+
+# Get the bytes of a uint32 as stored in a CStruct on this system
+my sub uint32_bytes ($v) {
+    my $cl = class :: is repr("CStruct") { has uint32 $.v };
+    |(nativecast(CArray[uint8], $cl.new(:$v))[^4]);
+}
 
 throws-like 'String.new(:name("OHAI" x 64)).bufs',
   Exception, message => /:i size\s+exceeded/,
@@ -76,54 +82,163 @@ given InternAtomRequest.new(:only_if_exists, :name("")) {
   is .bufs».values, (0x10,1,2,0,0,0,0,0), "$what bufferizes correctly";
 }
 
-given RotatePropertiesRequest.new(:window(0) :atoms(840,841,842,843,844,845,846) :delta(3)) {
-  my $what = "Request with one charfield null";
-  is .bufs».values, (0x10,1,2,0,0,0,0,0), "$what bufferizes correctly";
+use X11::XCB::XPrint;
 
+given Printer.new(:name<myprinter>, :description<mineminemine!>) {
+  my $what = "interleaved length field with normal contents";
+  ok $_.defined, "$what create perl instance";
+
+  my @bufs = (|$_ for .bufs);
+  # XXX get this confirmation value endian-adj
+
+
+  is @bufs, (uint32_bytes(9),|"myprinter".encode.values,
+             uint32_bytes(13),|"mineminemine!".encode.values,
+             ), "$what bufferizes correctly";
+  my $b = Buf.new(@bufs);
+  my $c = nativecast(.cstruct,$b);
+  is-deeply $c, .cstruct.new(:nameLen(9)), "$what roundtrip to cstruct";
+  my $left = 4 + 9 + 4 + 13;
+  my $s = Printer.new(nativecast(Pointer,$c), :$left, :!free);
+  is $left, 0, "$what unpacking subtracts its length correctly";
+  is-deeply $s.name, $_.name, "$what roundtrip to perl instance";
+  for ^(4 + 13 + 4 + 9) {
+      $left = $_;
+      throws-like 'Printer.new(nativecast(Pointer,$c), :$left, :!free)',
+          Exception, message => /:i short\s+packet/, "$what dies on short buffer ($_)";
+  }
+  is-deeply .name, "myprinter", "$what .name is a Str";
+  is-deeply .description, "mineminemine!", "$what .description is a Str";
+}
+
+given Printer.new(:name(""), :description<mineminemine!>) {
+  my $what = "interleaved length field with first field null";
+  ok $_.defined, "$what create perl instance";
+
+  my @bufs = (|$_ for .bufs);
+  # XXX get this confirmation value endian-adj
+
+
+  is @bufs, (uint32_bytes(0),
+             uint32_bytes(13),|"mineminemine!".encode.values,
+             ), "$what bufferizes correctly";
+  my $b = Buf.new(@bufs);
+  my $c = nativecast(.cstruct,$b);
+  is-deeply $c, .cstruct.new(:nameLen(0)), "$what roundtrip to cstruct";
+  my $left = 4 + 4 + 13;
+  my $s = Printer.new(nativecast(Pointer,$c), :$left, :!free);
+  is $left, 0, "$what unpacking subtracts its length correctly";
+  is-deeply $s.name, $_.name, "$what roundtrip to perl instance";
+  for ^(4 + 13 + 4) {
+      $left = $_;
+      throws-like 'Printer.new(nativecast(Pointer,$c), :$left, :!free)',
+          Exception, message => /:i short\s+packet/, "$what dies on short buffer ($_)";
+  }
+  is-deeply .name, "", "$what .name is a Str";
+  is-deeply .description, "mineminemine!", "$what .description is a Str";
+}
+
+given Printer.new(:name<foo>, :description("")) {
+  my $what = "interleaved length field with second field null";
+  ok $_.defined, "$what create perl instance";
+
+  my @bufs = (|$_ for .bufs);
+  # XXX get this confirmation value endian-adj
+
+
+  is @bufs, (uint32_bytes(3), |"foo".encode.values,
+             uint32_bytes(0)
+             ), "$what bufferizes correctly";
+  my $b = Buf.new(@bufs);
+  my $c = nativecast(.cstruct,$b);
+  is-deeply $c, .cstruct.new(:nameLen(3)), "$what roundtrip to cstruct";
+  my $left = 4 + 3 + 4;
+  my $s = Printer.new(nativecast(Pointer,$c), :$left, :!free);
+  is $left, 0, "$what unpacking subtracts its length correctly";
+  is-deeply $s.name, $_.name, "$what roundtrip to perl instance";
+  for ^(4 + 3 + 4) {
+      $left = $_;
+      throws-like 'Printer.new(nativecast(Pointer,$c), :$left, :!free)',
+          Exception, message => /:i short\s+packet/, "$what dies on short buffer ($_)";
+  }
+  is-deeply .name, "foo", "$what .name is a Str";
+  is-deeply .description, "", "$what .description is a Str";
+}
+
+given Printer.new(:name(""), :description("")) {
+  my $what = "interleaved length field with both fields null";
+  ok $_.defined, "$what create perl instance";
+
+  my @bufs = (|$_ for .bufs);
+  # XXX get this confirmation value endian-adj
+
+
+  is @bufs, (uint32_bytes(0),
+             uint32_bytes(0)
+             ), "$what bufferizes correctly";
+  my $b = Buf.new(@bufs);
+  my $c = nativecast(.cstruct,$b);
+  is-deeply $c, .cstruct.new(:nameLen(0)), "$what roundtrip to cstruct";
+  my $left = 4 + 4;
+  my $s = Printer.new(nativecast(Pointer,$c), :$left, :!free);
+  is $left, 0, "$what unpacking subtracts its length correctly";
+  is-deeply $s.name, $_.name, "$what roundtrip to perl instance";
+  for ^(4 + 4) {
+      $left = $_;
+      throws-like 'Printer.new(nativecast(Pointer,$c), :$left, :!free)',
+          Exception, message => /:i short\s+packet/, "$what dies on short buffer ($_)";
+  }
+  is-deeply .description, "", "$what .description is a Str";
+  is-deeply .name, "", "$what .name is a Str";
 }
 
 
-class QER
-    does X11::XCB::Request[99,
-                 xcb_extension_t,
-                 False] {
+#given RotatePropertiesRequest.new(:window(0) :atoms(840,841,842,843,844,845,846) :delta(3)) {
+#  my $what = "Request with one charfield null";
+#  is .bufs».values, (0x10,1,2,0,0,0,0,0), "$what bufferizes correctly";
+#}
 
-    my $.reply = Array;
-
-    my $.cstruct = class :: is repr("CStruct") {
-
-        has uint8 $.major_opcode is rw;
-        has uint8 $.pad0_0;
-        has uint16 $.length is rw;
-
-        method Hash {
-            {
-
-            }
-        }
-        method nativeize($p6) {
-            $!major_opcode = 99;
-        }
-    };
-
-
-
-    has $.sequence is rw;
-
-
-    method child_bufs {
-        my @bufs;
-
-        |@bufs;
-    }
-
-}
-
-{ use X11;
-my $c = X11::Connection.new();
-my $q = ListExtensionsRequest.new;
-my $co = $q.send($c);
-$c.flush;
-my $rep = await $co;
-$rep.list.perl.say;
-}
+#class QER
+#    does X11::XCB::Request[99,
+#                 xcb_extension_t,
+#                 False] {
+#
+#    my $.reply = Array;
+#
+#    my $.cstruct = class :: is repr("CStruct") {
+#
+#        has uint8 $.major_opcode is rw;
+#        has uint8 $.pad0_0;
+#        has uint16 $.length is rw;
+#
+#        method Hash {
+#            {
+#
+#            }
+#        }
+#        method nativeize($p6) {
+#            $!major_opcode = 99;
+#        }
+#    };
+#
+#
+#
+#    has $.sequence is rw;
+#
+#
+#    method child_bufs {
+#        my @bufs;
+#
+#        |@bufs;
+#    }
+#
+#}
+#
+#{ use X11;
+#my $c = X11::Connection.new();
+#my $q = ListExtensionsRequest.new;
+#my $co = $q.send($c);
+#$c.flush;
+#my $rep = await $co;
+#$rep.list.perl.say;
+#}

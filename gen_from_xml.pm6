@@ -197,22 +197,22 @@ sub MakeEnums ($mod) {
     # Keep some things in their own namespace rather than munging them
     my sub fix_export($enum) {
         my @elements = $enum.elements(:TAG<item>);
+        my @res = " is export(:DEFAULT :internal)", " is export(:enums)";
 
         # Perl6 things that can be overidden, but avoid surprises
         # TODOP6: will have to go look for more of these pre-publication
         if @elements.first(*.attribs<name> eq any <
              Cursor
             >) {
-            return " is export(:dangerous)";
+            @res[1] = " is export(:danger)";
         }
 
         # conflicts within or between modules
-        return "" if $enum.attribs<name> eq any <
+        @res[0] = " is export(:internal)" if $enum.attribs<name> eq any <
             NotifyDetail NotifyMode
         >;
 
-        # otherwise export it for internal use or when safe enums requested
-        return " is export(:internal :enums)";
+        |@res;
     }
 
     # Fixup/perlify for enum value names that conflict
@@ -259,10 +259,11 @@ sub MakeEnums ($mod) {
 
         my $ename = fix_name($e.attribs<name>);
         %EnumRemap{"{$mod.cname} {$e.attribs<name>.Str}"} = $ename;
-        my $export = fix_export($e);
+        (my $export_ext, my $export_int) = fix_export($e);
 
         $mod.enums.push:
-        "our enum {$ename}$export «\n    " ~
+        "our class {$ename}Enum$export_ext \{\n" ~
+        "    our enum {$ename}$export_int «\n        " ~
         (for $e.elements(:TAG<item>) -> $item {
             state $lastval = -Inf;
             my $v = $item.elements[0];
@@ -279,7 +280,7 @@ sub MakeEnums ($mod) {
             else {
                 ":$n\({$lastval = $v})"
             }
-        }).join("\n    ") ~ "\n»;\n\n";
+        }).join("\n        ") ~ "\n»;\n}\n\n";
     }
 }
 
@@ -331,43 +332,85 @@ my %cstructs;
 sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is rw") {
     given $f.name {
         when "field"|"exprfield" {
-            if $found_list {
-                ++$TODOP6;
-                $p{$TODOP6}.c_attr = "# $TODOP6: fixed field between dynamic lists";
-                $p{$TODOP6}.p_attr = "# $TODOP6: fixed field between dynamic lists";
-                succeed;
-            }
+            use NativeCall;
             my $name = $f.attribs<name>;
             my $type = $f.attribs<type>;
             my $has = "has";
             my $expr = $f.name eq "exprfield"
                      ?? "\n#{++$TODOP6} exprfield ^^" !! "";
-            $p{$name}.c_attr = qq:to<EOCA>;
-                has {NCtype($type)} \$.$name$rw;$expr
+
+            $p{$name}.c_attr = $found_list
+                ?? "# {NCtype($type)} \$.$name $expr unfixed offset"
+                !! "has {NCtype($type)} \$.$name$rw;$expr";
+
+            $p{$name}.p_attr = "has \$.$name is rw;$expr";
+
+            if $found_list {
+                $p{$name}.p2c_code = qq:to<EOPC>;
+                    \{
+                        my \$cl = class :: is repr("CStruct") \{
+                           has {NCtype($type)} \$.foo;
+                        }
+                        my \$ca = nativecast(CArray[uint8],
+                                            \$cl.new(:foo(\$.$name)));
+                        @bufs.push:
+                            Blob.new(\$ca[^nativesizeof({NCtype($type)})])
+                    }
+                    EOPC
+            }
+            else {
+                $p{$name}.c2p_arg = ":{$name}(\$\!$name)";
+                $p{$name}.p2c_init = "\$\!{$name} = \$p6.{$name};$expr";
+            }
+
+            if %cstructs{$type}:exists {
+                my $pptype = %cstructs{$type};
+                if $found_list {
+                    $p{$name}.c2p_code = qq:to<EOPC>;
+                        @args.append:
+                            "$name",
+                            $pptype\.new(Pointer.new(\$p + \$oleft - \$left),
+                                         :\$left, :!free);
+                        EOPC
+                    $p{$name}.p2c_init = qq:to<EOPI>;
+                        \{
+                            my \$c = {$pptype}::cstruct.nativeize(\$p6.$name);
+                            nativecast(CArray[uint8],\$\!$name)[
+                                ^nativesizeof({$pptype}::cstruct)] =
+                                nativecast(CArray[uint8],\$c)[
+                                    ^nativesizeof({$pptype}::cstruct)];
+                        }
+                        EOPI
+                }
+                else {
+                    $p{$name}.c_attr = qq:to<EOCT>;
+                        HAS {$pptype}::cstruct \$.$name$rw;$expr;
+                        EOCT
+                    $p{$name}.c2p_arg = qq:to<EOPA>;
+                        :{$name}({$pptype}.new(nativecast(Pointer[uint8],\$\!$name),
+                                   :left(nativesizeof({$pptype}::cstruct)), :!free))
+                        EOPA
+                }
+            }
+            else {
+                $p{$name}.c_attr ~= qq:to<EOCA>;
+
                 constant {$name}___maxof =
                     2 ** (nativesizeof({NCtype($type)}) * 8) - 1;
                 EOCA
-            $p{$name}.c2p_arg = ":{$name}(\$\!$name)";
-            $p{$name}.p_attr = "has \$.$name is rw;$expr";
-            $p{$name}.p2c_init = "\$\!{$name} = \$p6.{$name};$expr";
-            if %cstructs{$type}:exists {
-                my $pptype = %cstructs{$type};
-                $p{$name}.c_attr = qq:to<EOCT>;
-                    HAS {$pptype}::cstruct \$.$name$rw;$expr;
-                    EOCT
-                $p{$name}.c2p_arg = qq:to<EOPA>;
-                    :{$name}({$pptype}.new(nativecast(Pointer[uint8],\$\!$name),
-                               :left(nativesizeof({$pptype}::cstruct)), :!free))
-                    EOPA
-                $p{$name}.p2c_init = qq:to<EOPI>;
-                    \{
-                        my \$c = {$pptype}::cstruct.nativeize(\$p6.$name);
-                        nativecast(CArray[uint8],\$\!$name)[
-                            ^nativesizeof({$pptype}::cstruct)] =
-                            nativecast(CArray[uint8],\$c)[
-                                ^nativesizeof({$pptype}::cstruct)];
-                    }
-                    EOPI
+                if $found_list {
+                    $p{$name}.c2p_code = qq:to<EOPC>;
+                        @args.append:
+                            "$name",
+                            (if \$left >= nativesizeof({NCtype($type)}) \{
+                                LEAVE \{ \$left -= nativesizeof({NCtype($type)}); }
+                                # Strange incantation necessary
+                                nativecast(Pointer[{NCtype($type)}], Pointer.new(\$p + \$oleft - \$left)).deref
+                             }
+                             else \{ die "Short Packet" }
+                            )
+                        EOPC
+                }
             }
         }
         when "pad" {
@@ -399,12 +442,13 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                 my $name = $f.attribs<name>;
                 $p{$name}.c_attr = "# Dynamic layout: alignment padding";
                 $p{$name}.p_attr = "# Padding for alignment here in CStruct";
+                $TODOP6++;
                 $p{$name}.p2c_code = qq:to<EOCC>;
-                    # XXX need to align here
+                    # $TODOP6 need to align here
                     EOCC
                 $p{$name}.c2p_code = qq:to<EOPC>;
                     if ($align) \{
-                        my \$newp = nativecast(Pointer[uint8], \$p);
+                        my \$newp = Pointer[uint8].new(\$p);
                         my \$oldp = nativecast(Pointer[uint8], \$pstruct);
 
                         \$left -= (\$newp - \$oldp) % $align;
@@ -421,7 +465,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                     $p{$TODOP6}.c_attr = "# $TODOP6 complicated $_ ($eq) of {$f.attribs<type>}";
                     $p{$TODOP6}.p_attr = "# $TODOP6 complicated $_ ($eq) of {$f.attribs<type>}";
                 }
-                elsif $f.attribs<type> eq "char" {
+                elsif $f.attribs<type> eq any <char STRING8> {
 
                     my $name = $f.attribs<name>;
                     my $type = $f.attribs<type>;
@@ -434,18 +478,18 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                     }
                     $p{$name}.p_attr = "has \$.$name is rw;";
                     $p{$name}.p2c_code = qq:to<EOCC>;
-                    given \$\.{$name}.encode('utf8') \{
-                        if .elems \{ \@bufs.push(Blob.new(\$_.values)) }
-                    }
-                    EOCC
+                        given \$\.{$name}.encode('utf8') \{
+                            if .elems \{ \@bufs.push(Blob.new(\$_.values)) }
+                        }
+                        EOCC
                     $p{$name}.c2p_code = qq:to<EOPC>;
-                    \$left -= $eq;
-                    die("Short packet")
-                        unless \$left >= 0;
-                    @args.append: "$name",
-                        (Buf.new(nativecast(CArray[uint8], \$p)[^$eq]
-                        ).decode("utf8"));
-                    EOPC
+                        die("Short packet")
+                            unless \$left >= $eq;
+                        @args.append: "$name",
+                            (Buf.new(nativecast(CArray[uint8], Pointer.new(\$p + \$oleft - \$left))[^$eq]
+                            ).decode("utf8"));
+                        \$left -= $eq;
+                        EOPC
                 }
                 elsif %cstructs{$f.attribs<type>} -> $pt {
                     my $name = $f.attribs<name>;
@@ -491,12 +535,12 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                     }
                     EOCC
                     $p{$name}.c2p_code = qq:to<EOPC>;
-                    \$left -= $frval;
                     die("Short packet")
-                        unless \$left >= 0;
+                        unless \$left >= $frval;
                     @args.append: "$name",
-                        (Buf.new(nativecast(CArray[uint8], \$p)[^$frval]
+                        (Buf.new(nativecast(CArray[uint8], Pointer.new(\$p + \$oleft - \$left))[^$frval]
                         ).decode("utf8"));
+                    \$left -= $frval;
                     EOPC
                 }
                 elsif NCtype($f.attribs<type>) eq any <
@@ -522,35 +566,72 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
             }
             elsif $f.elements(:TAG<fieldref>) -> [ $fr ] {
                 my $frname = $fr.contents.Str;
-                if $f.attribs<type> eq "char" {
+                if $f.attribs<type> eq any <char STRING8> {
                     my $name = $f.attribs<name>;
                     my $type = $f.attribs<type>;
+
                     # Go back and remove the _len field from perl6 attributes
                     $p{$frname}.p_attr = "# $frname not needed in P6 object";
+
                     $p{$frname}.p2c_init = qq:to<EOPC>;
                         my \${$frname}___sizeof = \$p6.{$name}.encode('utf8').bytes;
                         die ("Maximum field size exceeded")
                             if \${$frname}___sizeof > {$frname}___maxof;
-                        \$\!$frname = \${$frname}___sizeof;
                         EOPC
+
+                    my $c2p_len = $p{$frname}.c2p_code;
+                    if $c2p_len ~~ s/^.*?\"$frname\"\s*\,// {
+                        $p{$frname}.c2p_code = qq:to<EOC1>;
+                            # No p6 attribute $frname to init but may need value in place
+                            my \${$frname}___inplace = $c2p_len;
+                            EOC1
+                    }
+                    else {
+                        $c2p_len = "";
+                        $p{$frname}.c2p_code = "# No p6 attribute $frname to init";
+                    }
+                    if $p{$frname}.c_attr ~~ /^\#/ {
+                       my $lc = "self.{$name}.encode('utf8').bytes";
+                       if $p{$frname}.p2c_code ~~
+                           /\$\.$frname <!before <alpha>|\d>/ {
+                           $p{$frname}.p2c_code ~~
+                               s:g/\$\.$frname <!before <alpha>|\d>/$lc/;
+                       }
+                    }
+                    else {
+                        $p{$frname}.p2c_init ~=
+                            "\n\$\!$frname = \${$frname}___sizeof;"
+                    }
+
                     $p{$frname}.c2p_arg = |();
                     $p{$name}.c_attr = "# Dynamic layout: chars";
                     $p{$name}.p_attr = "has \$.$name is rw;";
                     $p{$name}.p2c_code = qq:to<EOCC>;
-                    given \$\.{$name}.encode('utf8') \{
-                        if .elems \{ \@bufs.push(Blob.new(\$_.values)) }
-                    }
-                    EOCC
-                    $p{$name}.c2p_code = qq:to<EOPC>;
-                    \$left -= \$pstruct\.$frname;
-                    die("Short packet")
-                        unless \$left >= 0;
-                    @args.append:
-                        "$name",
-                        (Buf.new(nativecast(CArray[uint8], \$p)[
-                            ^\$pstruct\.$frname
-                        ]).decode("utf8"));
-                    EOPC
+                        given \$\.{$name}.encode('utf8') \{
+                            # XXX could we just pass the utf8 here?
+                            if .elems \{ \@bufs.push(Blob.new(\$_.values)) }
+                        }
+                        EOCC
+
+                    $p{$name}.c2p_code = $c2p_len ?? qq:to<EOP1> !! qq:to<EOP2>;
+                            die("Short packet")
+                                unless \$left >= \${$frname}___inplace;
+                            @args.append:
+                                "$name",
+                                (Buf.new(nativecast(CArray[uint8], Pointer.new(\$p + \$oleft - \$left))[
+                                    ^\${$frname}___inplace
+                                ]).decode("utf8"));
+                            \$left -= \${$frname}___inplace;
+                            EOP1
+                            die("Short packet")
+                                unless \$left >= \$pstruct\.$frname;
+                            @args.append:
+                                "$name",
+                                (Buf.new(nativecast(CArray[uint8], Pointer.new(\$p + \$oleft - \$left))[
+                                    ^\$pstruct\.$frname
+                                ]).decode("utf8"));
+                            \$left -= \$pstruct\.$frname;
+                            EOP2
                 }
                 elsif NCtype($f.attribs<type>) eq any <
                     int8 int16 int32 int64 uint8 uint16 uint32 uint64 long
@@ -562,15 +643,57 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
 
                     # Go back and remove the _len field from perl6 attributes
                     $p{$frname}.p_attr = "# $frname not needed in P6 object";
-                    $p{$frname}.p2c_init =
-                        "\$\!$frname = \$p6.{$name}.elems;";
+                    $p{$frname}.p2c_init = qq:to<EOPI>;
+                        die ("Maximum field size exceeded")
+                            if \$p6.{$name}.elems > {$frname}___maxof;
+                        EOPI
+                    my $c2p_len = $p{$frname}.c2p_code;
+                    if $c2p_len ~~ s/^.*?\"$frname\"\s*\,// {
+                        $p{$frname}.c2p_code = qq:to<EOC1>;
+                            # No p6 attribute $frname to init but may need value in place
+                            my \${$frname}___inplace = $c2p_len;
+                            EOC1
+                    }
+                    else {
+                        $c2p_len = "";
+                        $p{$frname}.c2p_code = "# No p6 attribute $frname to init";
+                    }
+                    if $p{$frname}.c_attr ~~ /^\#/ {
+                       my $lc = "self.{$name}.elems";
+                       if $p{$frname}.p2c_code ~~
+                           /\$\.$frname <!before <alpha>|\d>/ {
+                           $p{$frname}.p2c_code ~~
+                               s:g/\$\.$frname <!before <alpha>|\d>/$lc/;
+                       }
+                    }
+                    else {
+                       $p{$frname}.p2c_init ~= "\n\$\!$frname = \$p6.{$name}.elems;"
+                    }
                     $p{$frname}.c2p_arg = |();
                     $p{$name}.c_attr = "# Dynamic layout: {$type}s";
                     $p{$name}.p_attr = "has \@.$name is rw;";
                     $p{$name}.p2c_code = qq:to<EOCC>;
                         \@bufs.push: Blob[$nct].new(|\@.$name);
                         EOCC
-                    # TODO c2p_code
+                    $p{$name}.c2p_code = $c2p_len ?? qq:to<EOP1> !! qq:to<EOP2>;
+                        @args.append:
+                            "$name",
+                            (for 0..^\${$frname}___inplace \{
+                                    # XXX no assurance pointer math will not start adding by sizeof
+                                die "Short Packet" unless \$left >= nativesizeof($nct);
+                                NEXT \{ \$left -= nativesizeof($nct) };
+                                nativecast(Pointer[{$nct}],Pointer.new(\$p + \$oleft - \$left)).deref;
+                            });
+                        EOP1
+                        @args.append:
+                            "$name",
+                            (for 0..^\$pstruct.$frname \{
+                                    # XXX no assurance pointer math will not start adding by sizeof
+                                die "Short Packet" unless \$left >= nativesizeof($nct);
+                                NEXT \{ \$left -= nativesizeof($nct) };
+                                nativecast(Pointer[{$nct}],Pointer.new(\$p + \$oleft - \$left)).deref;
+                            });
+                        EOP2
                 }
                 elsif $f.attribs<type> eq "STR" {
                     # Map String directly to Perl6 Str
@@ -1063,8 +1186,10 @@ sub MakeReplies($mod) {
 
             $p<pad0_0>.c_attr = 'has uint8 $.pad0_0;' unless $p.params[0]:exists;
             $p.params.splice(1,0,
-                 param.new(:name<sequence>,:c_attr('has uint16 $.sequence is rw;')),
-                 param.new(:name<length>,:c_attr('has uint32 $.length is rw;')),
+                param.new(:name<sequence>,:c_attr('has uint16 $.sequence is rw;')),
+                param.new(:name<length>,:c_attr(
+                    'has uint32 $.length is rw;' ~ "\n" ~
+                    'constant length___maxof = 0xffffffff;' ~ "\n"))
             );
             $p.params.unshift(
                  param.new(:name<response_type>,
@@ -1092,7 +1217,7 @@ sub MakeReplies($mod) {
             @p6classes.push(qq:to<EO6C>);
                 {@doc.join("\n")}
                 our class {$clname}Reply
-                    does Reply[{$oname}Opcode({$req.attribs<opcode>})]
+                    does Reply[{$oname}OpcodeEnum::{$oname}Opcode({$req.attribs<opcode>})]
                     is export(:DEFAULT, :replies) \{
 
                 { @cstructs[*-1] }
@@ -1162,7 +1287,9 @@ sub MakeRequests($mod) {
 
         $p<pad0_0>.c_attr = 'has uint8 $.pad0_0;' unless $p.params[0]:exists;
         $p.params.splice(1,0,
-             param.new(:name<length>,:c_attr('has uint16 $.length is rw;')));
+             param.new(:name<length>,:c_attr(
+                       'has uint16 $.length is rw;' ~ "\n" ~
+                       'constant length___maxof = 0xffff;' ~ "\n")));
         $p.params.unshift(
              param.new(:name<major_opcode>
                        :p2c_init("\$!major_opcode = {$req.attribs<opcode>};")
@@ -1203,7 +1330,7 @@ sub MakeRequests($mod) {
 {%GoodReqs{$isvoid ?? "Nil" !! "$oname $clname"} ?? "" !! "# TODOP6 Reply has TODOP6s"}
             {@doc.join("\n")}
             our class {$clname}Request
-                does Request[{$oname}Opcode({$req.attribs<opcode>}),
+                does Request[{$oname}OpcodeEnum::{$oname}Opcode({$req.attribs<opcode>}),
                              {$mod.cname eq "xproto"
                                   ?? "xcb_extension_t"
                                   !! '$xcb_' ~ $mod.cname ~ "_id"},
@@ -1237,10 +1364,11 @@ sub Output ($mod) {
     $out.print($mod.prologue ~ "\n");
 
     $out.print( qq:to<EOOC> ) if $mod.opcodes;
-        our enum { $mod.extension ?? $mod.modname !! "" }Opcode
-            is export(:opcodes) «
-        { (":{.value}({.key})\n" for $mod.opcodes.sort(+*.key)).join.indent(4) }
-        »;
+        our class { $mod.extension ?? $mod.modname !! "" }OpcodeEnum is export(:opcodes) \{
+            our enum { $mod.extension ?? $mod.modname !! "" }Opcode is export(:enums) «
+        { (":{.value}({.key})\n" for $mod.opcodes.sort(+*.key)).join.indent(8) }
+            »;
+        }
 
         EOOC
     $out.print($mod.enums.join);

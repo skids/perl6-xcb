@@ -346,10 +346,12 @@ our class Font is export {
 our class Window is export {
     has Resource $.wid;
 
+    import WindowClassEnum :enums;
+
     method new(Connection $c, :$map = True, :$depth = 24,
                :$x = 100, :$y = 100, :$width = 250, :$height = 250,
                :$border_width = 10,
-               :$class = X11::XCB::XProto::WindowClass::InputOutput,
+               :$class = InputOutput,
                :$parent = $c.roots[0].root,
                :$visual = $c.roots[0].root_visual) {
         my $wid = Resource.new(:from($c));
