@@ -370,15 +370,15 @@ our role Struct is export(:internal) {
         $left -= nativesizeof($.cstruct);
 	fail("Short packet.") unless $left >= 0;
         my %childinits;
-        for self.child_structs(Pointer[uint8].new(
+        for (|$cs.Hash.kv, |self.child_structs(Pointer[uint8].new(
                                    nativecast(Pointer[uint8], $p)
                                    + nativesizeof($.cstruct)
-                               ), $cs, :$left) -> $k, \v {
+                               ), $cs, :$left)) -> $k, \v {
             use nqp;
             # XXX graceful way to decont without NQP or assuming listiness?
             %childinits{$k} := nqp::decont(v);
         }
-        my $res = ::?CLASS.bless(|$cs.Hash, |%childinits);
+        my $res = ::?CLASS.bless(|%childinits);
         xcb_free $p if $free;
         $res;
     }
@@ -415,6 +415,31 @@ our role Reply [$opcode] is export(:internal) {
 
     method cstruct {...}
 
+    method child_bufs { |() }
+
+    method Buf {
+        # XXX This is not technically safe.  We want GC memory,
+        # and aliases into it, but GC memory can move anytime.
+        my $len = nativesizeof($.cstruct);
+        my $res = Buf.new(0 xx $len);
+        my $c := nativecast($.cstruct, $res);
+        $c.nativeize(self);
+        $res;
+    }
+
+    method bufs {
+        my @bufs = self.Buf, self.child_bufs;
+        # XXX safe to use GC memory like this?
+        my $c := nativecast($.cstruct, @bufs[0]);
+        my $length = [+] @bufs».bytes;
+        die "BUG: absurd length of buffers"
+            if $length > 0x3ffffffff;
+        $length -= 32;
+        my $pad = -$length +& 3;
+        $c.length = ($length + 3) +> 2;
+        (|@bufs, padbuf($pad));
+    }
+
     #| Create a new X11 protocol reply Perl6 object.
     #| A first parameter, if provided, is a Pointer to buffer data.
     #| If provided, :left designates the length of data (in bytes) available
@@ -437,15 +462,15 @@ our role Reply [$opcode] is export(:internal) {
         $left -= nativesizeof($.cstruct);
 	fail("Short packet.") unless $left >= 0;
         my %childinits;
-        for self.child_structs(Pointer[uint8].new(
+        for (|$cs.Hash.kv, |self.child_structs(Pointer[uint8].new(
                                    nativecast(Pointer[uint8], $p)
                                    + nativesizeof($.cstruct)
-                               ), $cs, :$left) -> $k, \v {
+                               ), $cs, :$left)) -> $k, \v {
             use nqp;
             # XXX graceful way to decont without NQP or assuming listiness?
             %childinits{$k} := nqp::decont(v);
         }
-        my $res = ::?CLASS.bless(:sequence(+$cs.sequence), |$cs.Hash,
+        my $res = ::?CLASS.bless(:sequence(+$cs.sequence),
                                  |%childinits);
         xcb_free $p if $free;
         $res;
@@ -492,7 +517,7 @@ our role Request [$opcode, $ext, $isvoid] is export(:internal) {
         my $c := nativecast($.cstruct, @bufs[0]);
         my $length = [+] @bufs».bytes;
         die "BUG: absurd length of buffers"
-            if $length > 0x3ffffff;
+            if $length > 0x3ffff;
         my $pad = -$length +& 3;
         $c.length = ($length + 3) +> 2;
         (|@bufs, padbuf($pad));

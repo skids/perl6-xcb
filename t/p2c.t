@@ -193,6 +193,40 @@ given Printer.new(:name(""), :description("")) {
 }
 
 
+given QueryKeymapReply.new(:keys[^32]) {
+  my $what = "fixed length array (and a reply)";
+  ok $_.defined, "$what create perl instance";
+
+  my @bufs = (|$_ for .bufs);
+
+  is @bufs, @(uint32_bytes(0),uint32_bytes(2),|^32), "$what bufferizes correctly";
+
+  my $b = Buf.new(@bufs);
+  my $c = nativecast(.cstruct,$b);
+  is-deeply $c, .cstruct.new(:0keys___pad0, :1keys___pad1, :2keys___pad2,
+      :3keys___pad3, :4keys___pad4, :5keys___pad5, :6keys___pad6,
+      :7keys___pad7, :8keys___pad8, :9keys___pad9, :10keys___pad10,
+      :11keys___pad11, :12keys___pad12, :13keys___pad13, :14keys___pad14, 
+      :15keys___pad15, :16keys___pad16, :17keys___pad17, :18keys___pad18, 
+      :19keys___pad19, :20keys___pad20, :21keys___pad21, :22keys___pad22,
+      :23keys___pad23, :24keys___pad24, :25keys___pad25, :26keys___pad26, 
+      :27keys___pad27, :28keys___pad28, :29keys___pad29, :30keys___pad30, 
+      :31keys___pad31, :2length, :0sequence), "$what roundtrip to cstruct";
+  my $left = 40;
+  my $s = QueryKeymapReply.new(nativecast(Pointer,$c), :$left, :!free);
+  is $left, 0, "$what unpacking subtracts its length correctly";
+  is-deeply $s.keys, $_.keys, "$what roundtrip to perl instance";
+#  for ^(4 + 4) {
+#      $left = $_;
+#      throws-like 'Printer.new(nativecast(Pointer,$c), :$left, :!free)',
+#          Exception, message => /:i short\s+packet/, "$what dies on short buffer ($_)";
+#  }
+#  is-deeply .description, "", "$what .description is a Str";
+#  is-deeply .name, "", "$what .name is a Str";
+}
+
+
+
 #given RotatePropertiesRequest.new(:window(0) :atoms(840,841,842,843,844,845,846) :delta(3)) {
 #  my $what = "Request with one charfield null";
 #  is .bufs».values, (0x10,1,2,0,0,0,0,0), "$what bufferizes correctly";

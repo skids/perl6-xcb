@@ -70,7 +70,7 @@ sub MAIN (:$xmldir? is copy) {
     my @xmlfiles = $xmldir.dir.grep(*.extension eq any <XML xml>);
 
     # TODOP6: Skipping xkb and xinput for now.  Enums need a lot of work.
-    @xmlfiles = @xmlfiles.grep(*.basename ne any <xkb.xml>);
+#    @xmlfiles = @xmlfiles.grep(*.basename ne any <xkb.xml>);
 
 # for fast testing
 #@xmlfiles = @xmlfiles.grep(*.basename eq any <xproto.xml res.xml>);
@@ -224,6 +224,9 @@ sub MakeEnums ($mod) {
             eq any <PresentEventMask SelectionEventMask
                     CursorNotifyMask NotifyMask>;
 
+        return $item ~ "Notify" if $from eq "Notify" and
+            $mod.cname eq "randr";
+
         return "CW$item"      if $from eq any <CW ConfigWindow>;
         return "SaveSet$item" if $from ~~ /^SaveSet/;
         return "Alarm$item"   if $from eq "ALARMSTATE";
@@ -328,7 +331,7 @@ sub build_equation($f) {
    build_op($f.elements[0]);
 }
 
-my %cstructs;
+my %cstructs = "sync:INT64" => "Counter64";
 sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is rw") {
     given $f.name {
         when "field"|"exprfield" {
@@ -435,8 +438,8 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
             }).join(" ");
         }
         when "list" {
-            $found_list++;
             if $f.attribs<name> ~~ /^alignment_pad/ {
+                $found_list++;
                 my $align = 4;
                 # Map String directly to Perl6 Str
                 my $name = $f.attribs<name>;
@@ -459,6 +462,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
             }
             elsif +$f.elements and
                 $f.elements».name.join(" ") ne any <fieldref value> {
+                $found_list++;
                 my $eq = build_equation($f);
                 if ($eq ~~ /TODOP6/) {
                     $TODOP6++;
@@ -524,17 +528,49 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
             }
             elsif $f.elements(:TAG<value>) -> [ $val ] {
                 my $frval = $val.contents.Str.Int;
+                my $name = $f.attribs<name>;
+                my $type = $f.attribs<type>;
+                my $nct = NCtype($type);
+                unless $found_list {
+                    # We know where the structure is exactly and it is
+                    # a fixed size structure.  Until CStruct can handle
+                    # shaped arrays, pad it out.
+                    $p{$name}.c_attr = (for ^+$frval -> $i {
+                        "has $nct \$.{$name}___pad$i;"
+                    }).join("\n");
+                    if $f.attribs<type> eq "char" {
+                        $p{$name}.p2c_init = qq:to<EOCF>;
+                            do given \$p6\.{$name}.encode('utf8') \{
+                                die "String must be $frval bytes long" if .elems != $frval;
+                            EOCF
+                        $p{$name}.c2p_arg = ":{$name}(Buf.new(" ~
+                            (for ^+$frval { "\$.{$name}___pad$_" }).join(",")
+                            ~ ").decode('utf8'))";
+                    }
+                    else {
+                        $p{$name}.p2c_init = qq:to<EOCF>;
+                            do given \$p6\.{$name} \{
+                                die "Array must be $frval items long" if .elems != $frval;
+                            EOCF
+                        $p{$name}.c2p_arg = ":{$name}(" ~
+                            (for ^+$frval { "self.{$name}___pad$_" }).join(",")
+                            ~ ")";
+                    }
+                    $p{$name}.p2c_init ~= (for ^+$frval -> $i {
+                        "    \$\!{$name}___pad$i = \$_[$i];"
+                    }).join("\n");
+                    $p{$name}.p2c_init ~= "\n}";
+                }
                 if $f.attribs<type> eq "char" {
-                    my $name = $f.attribs<name>;
-                    my $type = $f.attribs<type>;
-                    $p{$name}.c_attr = "# Dynamic layout: $name\[$val] chars";
+                    $p{$name}.c_attr ||= "# Dynamic layout: $name\[$frval] chars";
                     $p{$name}.p_attr = "has \$.$name is rw;";
-                    $p{$name}.p2c_code = qq:to<EOCC>;
+                    $p{$name}.p2c_code = qq:to<EOCC> if $found_list;
                     given \$\.{$name}.encode('utf8') \{
-                        if .elems \{ \@bufs.push(Blob.new(\$_.values)) }
+                        die "String must be $frval bytes" if .elems != $frval;
+                        \@bufs.push(Blob.new(\$_.values)
                     }
                     EOCC
-                    $p{$name}.c2p_code = qq:to<EOPC>;
+                    $p{$name}.c2p_code = qq:to<EOPC> if $found_list;
                     die("Short packet")
                         unless \$left >= $frval;
                     @args.append: "$name",
@@ -547,14 +583,10 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                     int8 int16 int32 int64 uint8 uint16 uint32 uint64 long
                     longlong bool size_t
                 > {
-                    my $name = $f.attribs<name>;
-                    my $type = $f.attribs<type>;
-                    my $nct = NCtype($type);
-
-                    $p{$name}.c_attr =
-                        "# Dynamic layout: $name\[$val] of $type";
+                    $p{$name}.c_attr ||=
+                        "# Dynamic layout: $name\[$frval] of $type";
                     $p{$name}.p_attr = "has \@.$name is rw;";
-                    $p{$name}.p2c_code = qq:to<EOCC>;
+                    $p{$name}.p2c_code = qq:to<EOCC> if $found_list;
                         \@bufs.push: Blob[$nct].new(|\@.$name);
                         EOCC
                 }
@@ -565,6 +597,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                 }
             }
             elsif $f.elements(:TAG<fieldref>) -> [ $fr ] {
+                $found_list++;
                 my $frname = $fr.contents.Str;
                 if $f.attribs<type> eq any <char STRING8> {
                     my $name = $f.attribs<name>;
@@ -756,8 +789,8 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                 }
                 else {
                     $TODOP6++;
-                    $p{$TODOP6}.c_attr = "# $TODOP6 nonchar $_";
-                    $p{$TODOP6}.p_attr = "# $TODOP6 nonchar $_";
+                    $p{$TODOP6}.c_attr = "# $TODOP6 unknown $_";
+                    $p{$TODOP6}.p_attr = "# $TODOP6 unknown $_";
                 }
             }
         }
@@ -1085,6 +1118,7 @@ sub MakeStructs($mod) {
             when "Notify" { "{$oname}Notify" }
             when "Modeinfo" { "{$oname}Modeinfo" }
             when "Format" { "{$oname}Format" }
+            when "INT64" { "Counter64" }
             default    { $_  }
         });
         %cstructs{$struct.attribs<name>} = $clname;
@@ -1152,7 +1186,8 @@ sub MakeReplies($mod) {
                 DestroyContext QueryVersion QueryExtension ListProperties
                 CreateCursor GetVersion QueryBestSize SelectInput
                 Enable CreateContext ChangeSaveSet PutImage CreatePixmap
-            > or $mod.cname eq "present";
+            > or $mod.cname eq "present"
+              or ($clname ~~ /^Shm/) and $mod.cname eq "xv";
         my @doc;
 
         next unless (for $req.elements(:TAG<reply>) -> $rep {
@@ -1320,7 +1355,8 @@ sub MakeRequests($mod) {
                 DestroyContext QueryVersion QueryExtension ListProperties
                 CreateCursor GetVersion QueryBestSize SelectInput
                 Enable CreateContext ChangeSaveSet PutImage CreatePixmap
-            > or $mod.cname eq "present";
+            > or $mod.cname eq "present"
+              or ($clname ~~ /^Shm/) and $mod.cname eq "xv";
         my $isvoid = not $req.elements(:TAG<reply>);
 
         my @doc;
