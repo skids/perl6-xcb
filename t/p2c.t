@@ -3,7 +3,7 @@ use lib <blib/lib lib>;
 
 use Test;
 
-plan 116;
+plan 136;
 
 use NativeCall;
 use X11::XCB;
@@ -13,6 +13,29 @@ use X11::XCB::XProto;
 my sub uint32_bytes ($v) {
     my $cl = class :: is repr("CStruct") { has uint32 $.v };
     |(nativecast(CArray[uint8], $cl.new(:$v))[^4]);
+}
+# Get the bytes of a uint16 as stored in a CStruct on this system
+my sub uint16_bytes ($v) {
+    my $cl = class :: is repr("CStruct") { has uint16 $.v };
+    |(nativecast(CArray[uint8], $cl.new(:$v))[0,1]);
+}
+# Get a uint32 as aliased to two uint16s in a CStruct on this system
+my sub uint16x2_uint32 ($v1, $v2) {
+    my $c32 = class :: is repr("CStruct") { has uint32 $.v };
+    my $c16 = class :: is repr("CStruct") { has uint16 $.v1;
+                                            has uint16 $.v2 };
+    nativecast($c32, $c16.new(:$v1, :$v2)).v;
+}
+# Get a uint32 as aliased to four uint8s in a CStruct on this system
+my sub uint16x4_uint8 ($v1, $v2, $v3, $v4) {
+    my $c32 = class :: is repr("CStruct") { has uint32 $.v };
+    my $c8 = class :: is repr("CStruct") {
+        has uint8 $.v1;
+        has uint8 $.v2;
+        has uint8 $.v3;
+        has uint8 $.v4;
+    }
+    nativecast($c32, $c8.new(:$v1, :$v2, :$v3, :$v4)).v;
 }
 
 throws-like 'String.new(:name("OHAI" x 64)).bufs',
@@ -216,16 +239,73 @@ given QueryKeymapReply.new(:keys[^32]) {
   my $s = QueryKeymapReply.new(nativecast(Pointer,$c), :$left, :!free);
   is $left, 0, "$what unpacking subtracts its length correctly";
   is-deeply $s.keys, $_.keys, "$what roundtrip to perl instance";
-#  for ^(4 + 4) {
-#      $left = $_;
-#      throws-like 'Printer.new(nativecast(Pointer,$c), :$left, :!free)',
-#          Exception, message => /:i short\s+packet/, "$what dies on short buffer ($_)";
-#  }
-#  is-deeply .description, "", "$what .description is a Str";
-#  is-deeply .name, "", "$what .name is a Str";
 }
 
+given ClientMessageEvent.new(:sequence(0),:window(3),:type(4),:data(Buf[uint32].new(1..5))) {
+  my $what = "32-bit ClientMessageEvent";
+  ok $_.defined, "$what create perl instance";
 
+  my @bufs = (|$_ for .bufs);
+
+  is @bufs, @(|(uint32_bytes($_) for (0,32,3,4,1,2,3,4,5))), "$what bufferizes correctly";
+
+  my $b = Buf.new(@bufs);
+  my $c = nativecast(.cstruct,$b);
+  is-deeply $c, .cstruct.new(
+    :0sequence, :32format, :3window, :4type, :1cmd___pad0,
+    :2cmd___pad1, :3cmd___pad2, :4cmd___pad3, :5cmd___pad4,
+  ), "$what roundtrip to cstruct";
+  my $left = 36;
+  my $s = ClientMessageEvent.new(nativecast(Pointer,$c), :$left, :!free);
+  is $left, 0, "$what unpacking subtracts its length correctly";
+  is-deeply $s.keys, $_.keys, "$what roundtrip to perl instance";
+}
+
+given ClientMessageEvent.new(:sequence(0),:window(3),:type(4),:data(Buf[uint16].new(1..10))) {
+  my $what = "16-bit ClientMessageEvent";
+  ok $_.defined, "$what create perl instance";
+
+  my @bufs = (|$_ for .bufs);
+
+  is @bufs, @(|(uint32_bytes($_) for (0,16,3,4)), |(uint16_bytes($_) for 1..10)), "$what bufferizes correctly";
+
+  my $b = Buf.new(@bufs);
+  my $c = nativecast(.cstruct,$b);
+  is-deeply $c, .cstruct.new(
+    :0sequence, :16format, :3window, :4type, 
+    :cmd___pad0(uint16x2_uint32(1,2)),
+    :cmd___pad1(uint16x2_uint32(3,4)),
+    :cmd___pad2(uint16x2_uint32(5,6)),
+    :cmd___pad3(uint16x2_uint32(7,8)),
+    :cmd___pad4(uint16x2_uint32(9,10))), "$what roundtrip to cstruct";
+  my $left = 36;
+  my $s = ClientMessageEvent.new(nativecast(Pointer,$c), :$left, :!free);
+  is $left, 0, "$what unpacking subtracts its length correctly";
+  is-deeply $s.keys, $_.keys, "$what roundtrip to perl instance";
+}
+
+given ClientMessageEvent.new(:sequence(0),:window(3),:type(4),:data(Buf[uint8].new(1..20))) {
+  my $what = "8-bit ClientMessageEvent";
+  ok $_.defined, "$what create perl instance";
+
+  my @bufs = (|$_ for .bufs);
+
+  is @bufs, @(|(uint32_bytes($_) for (0,8,3,4)), |(1..20)), "$what bufferizes correctly";
+
+  my $b = Buf.new(@bufs);
+  my $c = nativecast(.cstruct,$b);
+  is-deeply $c, .cstruct.new(
+    :0sequence, :8format, :3window, :4type, 
+    :cmd___pad0(uint16x4_uint8(1,2,3,4)),
+    :cmd___pad1(uint16x4_uint8(5,6,7,8)),
+    :cmd___pad2(uint16x4_uint8(9,10,11,12)),
+    :cmd___pad3(uint16x4_uint8(13,14,15,16)),
+    :cmd___pad4(uint16x4_uint8(17,18,19,20))), "$what roundtrip to cstruct";
+  my $left = 36;
+  my $s = ClientMessageEvent.new(nativecast(Pointer,$c), :$left, :!free);
+  is $left, 0, "$what unpacking subtracts its length correctly";
+  is-deeply $s.keys, $_.keys, "$what roundtrip to perl instance";
+}
 
 #given RotatePropertiesRequest.new(:window(0) :atoms(840,841,842,843,844,845,846) :delta(3)) {
 #  my $what = "Request with one charfield null";

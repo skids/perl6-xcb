@@ -51,6 +51,7 @@ class mod {
     has @.p6classes is rw;
     has %.opcodes is rw;
     has %.errors is rw;
+    has %.events is rw;
 }
 
 # Keep track of XML coverage during devel.
@@ -82,6 +83,8 @@ sub MAIN (:$xmldir? is copy) {
     MakeTypeDefs($_) for @mods;
     MakeErrors($_) for @mods;
     MakeErrors2($_) for @mods;
+    MakeEvents($_) for @mods;
+    MakeEvents2($_) for @mods;
     MakeStructs($_) for @mods;
     MakeReplies($_) for @mods;
     MakeRequests($_) for @mods;
@@ -336,6 +339,48 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
     given $f.name {
         when "field"|"exprfield" {
             use NativeCall;
+
+            if $f.attribs<type> eq "ClientMessageData" {
+                $p<data>.c_attr = q:to<EOCM>;
+                    has uint32 $.cmd___pad0;
+                    has uint32 $.cmd___pad1;
+                    has uint32 $.cmd___pad2;
+                    has uint32 $.cmd___pad3;
+                    has uint32 $.cmd___pad4;
+                    EOCM
+                $p<format>.p_attr = '# Use depth of $.data for $.format';
+                $p<format>.p2c_init = '$!format = nativesizeof($p6.data.of) +< 3;';
+                $p<format>.c2p_arg = |();
+                $p<data>.p_attr = 'has $.data;';
+                $p<data>.c2p_arg = q:to<EOPC>;
+                    :data(
+                        do given self.format {
+                            when 8 {
+                                Buf[uint8].new(
+                                    nativecast(CArray[uint8], self)[12..^32];
+                                )
+                            }
+                            when 8 {
+                                Buf[uint16].new(
+                                    nativecast(CArray[uint16], self)[6..^16];
+                                )
+                            }
+                            when 32 {
+                                Buf[uint32].new(
+                                    nativecast(CArray[uint32], self)[3..^8];
+                                )
+                            }
+
+                        }
+                    )
+                    EOPC
+                $p<data>.p2c_init =
+                    '($!cmd___pad0, $!cmd___pad1, $!cmd___pad2, ' ~
+                    '$!cmd___pad3, $!cmd___pad4)'
+                    ~ "\n" ~
+                    '    = nativecast(CArray[uint32],$p6.data)[^5] ';
+                succeed;
+            }
             my $name = $f.attribs<name>;
             my $type = $f.attribs<type>;
             my $has = "has";
@@ -937,8 +982,7 @@ sub MakeErrors($mod) {
         my params $p .= new;
         my $padnum = -1;
         my $found_list = 0;
-
-        %errorcopies{$error.attribs<name>.Str} := $p;
+        %errorcopies{$oname ~ $error.attribs<name>.Str} := $p;
         for $error.elements -> $e {
             MakeCStructField($p, $e, $padnum, $found_list);
         }
@@ -968,10 +1012,11 @@ sub MakeErrors2($mod) {
         my $padnum = -1;
 
         if $error.name eq "errorcopy" {
-            $p := %errorcopies{$error.attribs<ref>.Str}
+            $p := %errorcopies{$oname ~ $error.attribs<ref>.Str} //
+                  %errorcopies{$error.attribs<ref>.Str};
         }
         else {
-            $p := %errorcopies{$error.attribs<name>.Str};
+            $p := %errorcopies{$oname ~ $error.attribs<name>.Str};
         }
         my $number = $error.attribs<number>;
 
@@ -1002,7 +1047,7 @@ sub MakeErrors2($mod) {
         my $clname = $error.attribs<name>.Str;
         $clname = $clname.lc.tc if $clname ~~ /^<upper>+$/;
         $mod.errors{$number} = $oname ~ $clname ~ "Error";
-        %cstructs{$error.attribs<name>} = $clname;
+        %cstructs{$oname ~ $error.attribs<name>} = $clname;
 
         my $mcode;
         if not $oname and $error.attribs<name> eq "Request" {
@@ -1049,6 +1094,118 @@ sub MakeErrors2($mod) {
                 }
 
             $mcode
+
+            }
+            EO6C
+    }
+    $mod.cstructs.append(@cstructs);
+    $mod.p6classes.append(@p6classes);
+}
+
+my %eventcopies;
+sub MakeEvents($mod) {
+    my @cstructs;
+    my @p6classes;
+    my $oname = $mod.cname eq "xproto" ?? "" !! $mod.modname;
+
+    for $mod.xml.root.elements(:TAG<event>) -> $event {
+        my params $p .= new;
+        my $padnum = -1;
+        my $found_list = 0;
+
+        %eventcopies{$oname ~ $event.attribs<name>.Str} := $p;
+        for $event.elements -> $e {
+            MakeCStructField($p, $e, $padnum, $found_list);
+        }
+        for $event.elements -> $e {
+            if $event.elements(:TAG<doc>) -> [ $doc ] {
+                 if $doc.elements(:TAG<field>).grep(
+                     {$e.attribs<name>:exists and 
+                      $_.attribs<name> eq $e.attribs<name>}) -> [ $fdoc ] {
+                     my $docstr =
+                         ("#| $_" for $fdoc.cdata».data».Str.lines).join("\n");
+                     $p{$e.attribs<name>}.p_doc = $docstr
+                            if $p{$e.attribs<name>}.p_attr !~~ /^\#/;
+                     $p{$e.attribs<name>}.c_doc = $docstr;
+                 }
+            }
+        }
+    }
+}
+
+sub MakeEvents2($mod) {
+    my @cstructs;
+    my @p6classes;
+    my $oname = $mod.cname eq "xproto" ?? "" !! $mod.modname;
+
+    for (|$mod.xml.root.elements(:TAG<event>),|$mod.xml.root.elements(:TAG<eventcopy>)) -> $event {
+        my params $p;
+        my $padnum = -1;
+
+        if $event.name eq "eventcopy" {
+            $p := %eventcopies{$oname ~ $event.attribs<ref>.Str} //
+                %eventcopies{$event.attribs<ref>.Str};
+        }
+        else {
+            $p := %eventcopies{$oname ~ $event.attribs<name>.Str};
+        }
+        my $number = $event.attribs<number>;
+
+        @cstructs.push(qq:to<EOCS>);
+
+                our class cstruct is repr("CStruct") \{
+
+                    has uint8 \$.response_type is rw;
+                    has uint8 \$.event_code is rw;
+                    has uint16 \$.sequence is rw;
+            {({ |(.c_doc, .c_attr) } for $p.params).join("\n").indent(8)}
+
+                    method Hash \{
+                        \{
+                            :sequence(\$\!sequence),
+            {$p.params».c2p_arg.join(",\n").indent(16)}
+                        }
+                    }
+                    method nativeize(\$p6) \{
+                        \$\!sequence = \$p6.sequence;
+            {$p.params».p2c_init.join("\n").indent(12)}
+                    }
+                };
+                my \$.cstruct = cstruct;
+
+            EOCS
+
+        my $clname = $event.attribs<name>.Str;
+        $clname = $clname.lc.tc if $clname ~~ /^<upper>+$/;
+        $mod.events{$number} = $oname ~ $clname ~ "Event";
+        %cstructs{$oname ~ $event.attribs<name>} = $clname;
+
+        my @doc;
+        @doc.append(MakeClassDocs($event, $clname));
+
+        @p6classes.push(qq:to<EO6C>);
+            {@doc.join("\n")}
+            our class {$oname}{$clname}Event does Event[$number] is export(:DEFAULT, :events) \{
+                my \$.event_code = $number; # without the extension base number
+
+                { @cstructs[*-1] }
+
+                has \$.sequence;
+            {({ |(.p_doc, .p_attr) } for $p.params).join("\n").indent(4)}
+
+                method child_bufs \{
+                    my @bufs;
+            {$p.params».p2c_code.join("\n").indent(8)}
+                    |@bufs;
+                }
+
+                method child_structs(Pointer \$p, \$pstruct,
+                                     Real :\$left! is rw) \{
+                    my @args;
+                    my \$oleft = \$left;
+            {$p.params».c2p_code.join("\n").indent(8)}
+                    |@args;
+                }
 
             }
             EO6C
@@ -1413,6 +1570,11 @@ sub Output ($mod) {
     $out.print(qq:to<EOEH>);
         our \$errorcodes = :\{
         { (for $mod.errors.sort(+*.key) {
+              $_.key ~ " => " ~ $_.value
+           }).join(",\n").indent(4) }
+        };
+        our \$eventcodes = :\{
+        { (for $mod.events.sort(+*.key) {
               $_.key ~ " => " ~ $_.value
            }).join(",\n").indent(4) }
         };
