@@ -47,6 +47,7 @@ class mod {
     has $.prologue is rw;
     has @.enums is rw;
     has @.typedefs is rw;
+    has %.subclasses is rw;
     has @.cstructs is rw;
     has @.p6classes is rw;
     has %.opcodes is rw;
@@ -68,8 +69,8 @@ sub MAIN (:$xmldir? is copy) {
             EOHELP
     }
     $xmldir .= IO;
-    my @xmlfiles = $xmldir.dir.grep(*.extension eq any <XML xml>);
-
+    my @xmlfiles = $xmldir.dir.grep(*.extension eq any <XML xml>).grep(*.basename ne any <xproto.xml>);
+    @xmlfiles.unshift(|$xmldir.dir.grep(*.basename eq any <xproto.xml>));
     # TODOP6: Skipping xkb and xinput for now.  Enums need a lot of work.
 #    @xmlfiles = @xmlfiles.grep(*.basename ne any <xkb.xml>);
 
@@ -81,11 +82,11 @@ sub MAIN (:$xmldir? is copy) {
     GetOpcodes($_) for @mods;
     MakeEnums($_) for @mods;
     MakeTypeDefs($_) for @mods;
+    MakeStructs($_) for @mods;
     MakeErrors($_) for @mods;
     MakeErrors2($_) for @mods;
     MakeEvents($_) for @mods;
     MakeEvents2($_) for @mods;
-    MakeStructs($_) for @mods;
     MakeReplies($_) for @mods;
     MakeRequests($_) for @mods;
 #.enums.say for @mods;
@@ -175,8 +176,13 @@ sub MakeTypeDefs ($mod) {
     for $mod.xml.root.elements(:TAG<typedef>) -> $e {
         %nctypemap{$e.attribs<newname>} = $e.attribs<oldname>;
         my $t = NCtype($e.attribs<oldname>);
-        $mod.typedefs.push: "constant {$e.attribs<newname>}" ~
-            " is export(:internal, :ctypes) = $t;\n";
+        if ($e.attribs<newname> ~~ /Behavior|^SA/) {
+            $mod.subclasses{$e.attribs<newname>} = $e.attribs<oldname>;
+        }
+        else {
+            $mod.typedefs.push: "constant {$e.attribs<newname>}" ~
+                " is export(:internal, :ctypes) = $t;\n";
+        }
     }
 }
 
@@ -218,34 +224,33 @@ sub MakeEnums ($mod) {
         |@res;
     }
 
-    # Fixup/perlify for enum value names that conflict
+    # Fixup/perlify for enum value names that conflict intra-module
     my sub fix_valname($item, $from) {
         return "$from$item" if $item ~~ /^\d+/;
 
         # A bunch of masks named the same as their values
         return $item ~ "Mask" if $from
-            eq any <PresentEventMask SelectionEventMask
-                    CursorNotifyMask NotifyMask>;
-
+            eq any <PresentEventMask SelectionEventMask Explicit
+                    CursorNotifyMask NotifyMask SetOfGroup
+                    xkbControl NameDetail SAIsoLockNoAffect>
+            or $mod.cname eq "xkb" and $from eq any <EventType>;
+        return $item ~ "High" if $from eq 'BoolCtrlsHigh';
+        return $item ~ "Low" if $from eq 'BoolCtrlsLow';
+        return substr($from,0,*-5) ~ $item if $from
+            eq any <IMModsWhich IMGroupsWhich>;
+        return substr($from,0,3) ~ $item if $from
+            eq any <NKNDetail GBNDetail>;
+        return $from ~ $item if $from
+            eq any <SAType>;
         return $item ~ "Notify" if $from eq "Notify" and
             $mod.cname eq "randr";
 
         return "CW$item"      if $from eq any <CW ConfigWindow>;
-        return "SaveSet$item" if $from ~~ /^SaveSet/;
-        return "Alarm$item"   if $from eq "ALARMSTATE";
-        return "Video$item"   if $from eq "VideoNotifyReason";
 
         return "$from$item"
-            if $mod.cname eq "render" and $from eq any <Repeat CP>
-            or $mod.cname eq "xv" and $from eq any <GrabPortStatus>
-            or $mod.cname eq "xkb" and $from eq any <Groups GroupsWrap>
-            or $mod.cname eq "glx" and $from eq any <PBCDT>
-            or $mod.cname eq "present"
-                and $from eq any <Option Capability CompleteMode CompleteKind>
-            or $mod.cname eq "randr"
-                and $from eq any <SetConfig RandRConnection SelectInput>
+            if $mod.cname eq "xkb" and $from eq any <Groups>
             or $from eq any <
-                GrabMode LineStyle FillStyle CapStyle JoinStyle GC
+                GrabMode LineStyle FillStyle CapStyle JoinStyle GC SA SAIsoLockFlag
             >
             # Individual values
             or $item eq "PointerRoot" and $from eq "InputFocus"
@@ -254,6 +259,9 @@ sub MakeEnums ($mod) {
                 Lock Shift Insert Delete Button
                 Control Pointer Cursor Async
                 Grab LedMode AutoRepeatMode
+                KbdFeedbackClass BellFeedbackClass
+		LedFeedbackClass DfltXIClass
+                AllXIClasses Outline
             >;
 
         return "VISUAL"       if $item eq "VISUALID"; # restore consistency
@@ -330,11 +338,11 @@ multi sub build_op($f where {.name eq "value"}) {
 }
 
 sub build_equation($f) {
-   return "Not one root op" if $f.elements».name.join(" ") ne any <op unop>;
+   return "TODOP6 Not one root op" if $f.elements».name.join(" ") ne any <op unop>;
    build_op($f.elements[0]);
 }
 
-my %cstructs = "sync:INT64" => "Counter64";
+my %cstructs = "sync:INT64" => "Counter64", "Behavior" => "Behavior";
 sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is rw") {
     given $f.name {
         when "field"|"exprfield" {
@@ -505,20 +513,28 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                     }
                     EOPC
             }
-            elsif +$f.elements and
+            elsif not +$f.elements or
                 $f.elements».name.join(" ") ne any <fieldref value> {
                 $found_list++;
-                my $eq = build_equation($f);
+                my $eq;
+                if +$f.elements {
+                    $eq = build_equation($f);
+                }
+                else {
+                    # Just run until length is exhausted.
+                    # This will need to be adjusted for widths.
+                    $eq = '($pstruct.length * 4 - $oleft + $left)';
+                }
+
+                my $name = $f.attribs<name>;
+                my $type = $f.attribs<type>;
+
                 if ($eq ~~ /TODOP6/) {
                     $TODOP6++;
                     $p{$TODOP6}.c_attr = "# $TODOP6 complicated $_ ($eq) of {$f.attribs<type>}";
                     $p{$TODOP6}.p_attr = "# $TODOP6 complicated $_ ($eq) of {$f.attribs<type>}";
                 }
                 elsif $f.attribs<type> eq any <char STRING8> {
-
-                    my $name = $f.attribs<name>;
-                    my $type = $f.attribs<type>;
-
                     if $eq ~~ /pstruct\.<!before length<!alpha>>/ {
                         $TODOP6++;
                         $p{$name}.c_attr = "# Dynamic layout: {$type}s $TODOP6 fields other than .length";
@@ -540,10 +556,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                         \$left -= $eq;
                         EOPC
                 }
-                elsif %cstructs{$f.attribs<type>} -> $pt {
-                    my $name = $f.attribs<name>;
-                    my $type = $f.attribs<type>;
-
+                elsif %cstructs{$type} -> $pt {
                     if $eq ~~ /pstruct\.<!before length<!alpha>>/ {
                         $TODOP6++;
                         $p{$name}.c_attr = "# Dynamic layout: {$type}s $TODOP6 fields other than .length";
@@ -554,14 +567,40 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                     $p{$name}.p2c_code = qq:to<EOCC>;
                         \@bufs.push(\$_.bufs) for \$.$name;
                         EOCC
+                    my $loop = +$f.elements ?? "for 0..^$eq" !! 'while $left';
                     $p{$name}.c2p_code = qq:to<EOPC>;
+
                     @args.append:
                         "$name",
-                        (for 0..^$eq \{
+                        ($loop \{
                                 # XXX no assurance pointer math will not start adding by sizeof
                                 $pt\.new(Pointer.new(\$p + \$oleft - \$left),
                                          :\$left, :!free);
                             }
+                        );
+                    EOPC
+                }
+                elsif NCtype($f.attribs<type>) eq any <
+                    int8 int16 int32 int64 uint8 uint16 uint32 uint64 long
+                    longlong bool size_t
+                > {
+                    my $nct = NCtype($f.attribs<type>);
+                    if $eq ~~ /pstruct\.<!before length<!alpha>>/ {
+                        $TODOP6++;
+                        $p{$name}.c_attr = "# Dynamic layout: {$type}s $TODOP6 fields other than .length";
+                    } else {
+                        $p{$name}.c_attr = "# Dynamic layout: {$type}s";
+                    }
+                    $eq ~= "div nativesizeof($nct)" unless +$f.elements;
+                    $p{$name}.p_attr = "has \@.$name is rw;";
+                    $p{$name}.p2c_code = qq:to<EOCC>;
+                        \@bufs.push(Buf[$nct].new(|\@.$name));
+                        EOCC
+                    $p{$name}.c2p_code = qq:to<EOPC>;
+                    die("Short Packet") if \$left < (($eq) * nativesizeof($nct));
+                    @args.append:
+                        "$name",
+                        (nativecast(CArray[$nct],Pointer.new(\$p + \$oleft - \$left))[0..^($eq)]
                         );
                     EOPC
                 }
@@ -1322,9 +1361,59 @@ sub MakeStructs($mod) {
 
             }
             EO6C
+
+            if $clname eq 'CommonBehavior' {
+                @cstructs.push(@cstructs[*-1]);
+                @p6classes.push(q:to<EOBH>) 
+                our class Behavior is export(:DEFAULT, :structs) {
+                    constant cstruct = CommonBehavior::cstruct;
+
+                    multi method new(|c (Int $t, |rest)) { callwith(BehaviorTypeEnum::BehaviorType($t), |rest) }
+                    multi method new(BehaviorTypeEnum::BehaviorType:D $t, |rest) {
+                        my $bhname = $t.Str;
+                        $bhname ~~ s/^BehaviorType//;
+                        $bhname ~= "Behavior";
+                        ::($bhname).new(|rest);
+                    }
+                    multi method new(Pointer $p, :$left, Bool :$free = False) {
+                        my $l = $left;
+                        nextwith($p, :left($l), :$free);
+                    }
+                    multi method new(Pointer $p, :$left! is rw, Bool :$free = False) {
+                        die ("Short Packet")
+                           if $left < nativesizeof(cstruct);
+                        my $cb = nativecast(cstruct, $p);
+                        my $bhname = BehaviorTypeEnum::BehaviorType($cb.type);
+                        $bhname ~~ s/^BehaviorType//;
+                        $bhname ~= "Behavior";
+                        ::($bhname).new($p, :$left, :$free);
+                    }
+                }
+            EOBH
+            }
+
+        my @resolve;
+        while $mod.subclasses.grep(*.value eq $clname).cache -> $list {
+            for |$list {
+                my $newname = $_.key;
+                @cstructs.push(@cstructs[*-1]);
+                @p6classes.push(qq:to<EOSC>);
+
+                    our class $newname is $clname is export(:DEFAULT, :structs) \{
+                        constant cstruct = {$clname}::cstruct;
+                    }
+
+                    EOSC
+                @resolve.push($newname);
+                $mod.subclasses{$clname}:delete;
+            }
+            $clname = @resolve.pop;
+        }
     }
     $mod.cstructs.append(@cstructs);
     $mod.p6classes.append(@p6classes);
+
+
 }
 
 sub MakeReplies($mod) {
@@ -1341,7 +1430,7 @@ sub MakeReplies($mod) {
         $clname = $mod.modname ~ $clname
             if $clname eq any <
                 DestroyContext QueryVersion QueryExtension ListProperties
-                CreateCursor GetVersion QueryBestSize SelectInput
+                CreateCursor GetVersion QueryBestSize SelectInput Bell
                 Enable CreateContext ChangeSaveSet PutImage CreatePixmap
             > or $mod.cname eq "present"
               or ($clname ~~ /^Shm/) and $mod.cname eq "xv";
@@ -1510,7 +1599,7 @@ sub MakeRequests($mod) {
         $clname = $mod.modname ~ $clname
             if $clname eq any <
                 DestroyContext QueryVersion QueryExtension ListProperties
-                CreateCursor GetVersion QueryBestSize SelectInput
+                CreateCursor GetVersion QueryBestSize SelectInput Bell
                 Enable CreateContext ChangeSaveSet PutImage CreatePixmap
             > or $mod.cname eq "present"
               or ($clname ~~ /^Shm/) and $mod.cname eq "xv";
@@ -1567,6 +1656,7 @@ sub Output ($mod) {
     $out.print($mod.enums.join);
     $out.print($mod.typedefs.join);
     $out.print($mod.p6classes.grep({$_ !~~ /TODOP6/}).join);
+
     $out.print(qq:to<EOEH>);
         our \$errorcodes = :\{
         { (for $mod.errors.sort(+*.key) {
