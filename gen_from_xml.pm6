@@ -154,6 +154,7 @@ sub NCtype ($t is copy) {
     $t ~~ s/^BYTE$/uint8/;
     $t ~~ s/^INT/int/;
     $t ~~ s/^char$/uint8/;
+    $t ~~ s/^FLOAT/num/;
     $t ~~ s/^float$/num32/;
     $t ~~ s/^double$/num64/;
     %nctypemap{$o} = $t unless $o eq $t;
@@ -582,7 +583,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                 }
                 elsif NCtype($f.attribs<type>) eq any <
                     int8 int16 int32 int64 uint8 uint16 uint32 uint64 long
-                    longlong bool size_t
+                    longlong bool size_t num32 num64
                 > {
                     my $nct = NCtype($f.attribs<type>);
                     if $eq ~~ /pstruct\.<!before length<!alpha>>/ {
@@ -665,7 +666,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                 }
                 elsif NCtype($f.attribs<type>) eq any <
                     int8 int16 int32 int64 uint8 uint16 uint32 uint64 long
-                    longlong bool size_t
+                    longlong bool size_t num32 num64
                 > {
                     $p{$name}.c_attr ||=
                         "# Dynamic layout: $name\[$frval] of $type";
@@ -752,7 +753,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                 }
                 elsif NCtype($f.attribs<type>) eq any <
                     int8 int16 int32 int64 uint8 uint16 uint32 uint64 long
-                    longlong bool size_t
+                    longlong bool size_t num32 num64
                 > {
                     my $name = $f.attribs<name>;
                     my $type = $f.attribs<type>;
