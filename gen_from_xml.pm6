@@ -886,7 +886,11 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
             # One of the deficiencies it had was not listing the
             # enum of the mask bit values.  So we fix this up.
             my %vpmap = (
-                :CreateWindow<CW>
+                :CreateWindow<CW>, :ChangeWindowAttributes<CW>,
+                :SetAttributes<CW>, :ConfigureWindow<ConfigWindow>,
+                :CreateGC<GC>, :ChangeGC<GC>, :ChangeKeyboardControl<KB>,
+                :PrintInputSelected<EvMask>, :PrintSelectInput<EvMask>,
+                :CreatePicture<CP>, :ChangePicture<CP>
             );
             my $parent = $f.parent;
             $parent = $parent.parent if $parent.name eq "reply";
@@ -1315,6 +1319,7 @@ sub MakeStructs($mod) {
             when "Notify" { "{$oname}Notify" }
             when "Modeinfo" { "{$oname}Modeinfo" }
             when "Format" { "{$oname}Format" }
+            when "Event" { "{$oname}Event" }
             when "INT64" { "Counter64" }
             default    { $_  }
         });
