@@ -53,6 +53,8 @@ class mod {
     has %.opcodes is rw;
     has %.errors is rw;
     has %.events is rw;
+    has %.occlude is rw;
+    has Array %.rolecstruct is rw;
 }
 
 # Keep track of XML coverage during devel.
@@ -71,11 +73,9 @@ sub MAIN (:$xmldir? is copy) {
     $xmldir .= IO;
     my @xmlfiles = $xmldir.dir.grep(*.extension eq any <XML xml>).grep(*.basename ne any <xproto.xml>);
     @xmlfiles.unshift(|$xmldir.dir.grep(*.basename eq any <xproto.xml>));
-    # TODOP6: Skipping xkb and xinput for now.  Enums need a lot of work.
-#    @xmlfiles = @xmlfiles.grep(*.basename ne any <xkb.xml>);
 
 # for fast testing
-#@xmlfiles = @xmlfiles.grep(*.basename eq any <xproto.xml res.xml>);
+#@xmlfiles = @xmlfiles.grep(*.basename eq any <xproto.xml>);
     my @mods;
     @mods.push(MakeMod($_)) for @xmlfiles;
     MakeImports($_, @mods) for @mods;
@@ -145,7 +145,7 @@ sub MakeMod ($xml) {
             :$xextension, :$cname, :$prologue);
 }
 
-our %nctypemap = ();
+our %nctypemap = "shape:KIND" => "uint8";
 sub NCtype ($t is copy) {
     my $o = $t;
     $t = %nctypemap{$t} while %nctypemap{$t}:exists;
@@ -168,7 +168,11 @@ sub NCtype ($t is copy) {
 sub MakeTypeDefs ($mod) {
     for (|$mod.xml.root.elements(:TAG<xidtype>),|$mod.xml.root.elements(:TAG<xidunion>)) -> $e {
         my $t = $e.attribs<name>;
-        $t = "Glx$t" if $mod.cname eq "glx";
+        %nctypemap{$t} = $t ~ "ID";
+        %nctypemap{$t ~ "ID"} = "uint32";
+        $t = %nctypemap{"glx:$t"} = "Glx$t" if $mod.cname eq "glx";
+        $t = %nctypemap{"record:$t"} = "Record$t" if $mod.cname eq "record";
+        %nctypemap{"xproto:$t"} = $t if $mod.cname eq "xproto";
         $t = %nctypemap{$t} = $t ~ "ID";
         %nctypemap{$t} = "uint32";
         $mod.typedefs.push: "constant $t" ~
@@ -186,6 +190,10 @@ sub MakeTypeDefs ($mod) {
         }
     }
 }
+
+# Deal with enums and unions that are used to multiplex classes
+our %ClassOcclude = "randr:Notify" => "NotifyData";
+our %ClassMultiplex = "randr:Notify" => "u:subCode";
 
 our %EnumRemap;
 sub MakeEnums ($mod) {
@@ -251,7 +259,7 @@ sub MakeEnums ($mod) {
         return "$from$item"
             if $mod.cname eq "xkb" and $from eq any <Groups>
             or $from eq any <
-                GrabMode LineStyle FillStyle CapStyle JoinStyle GC SA SAIsoLockFlag
+                GrabMode LineStyle FillStyle CapStyle JoinStyle GC SA SAIsoLockFlag CP
             >
             # Individual values
             or $item eq "PointerRoot" and $from eq "InputFocus"
@@ -271,31 +279,77 @@ sub MakeEnums ($mod) {
     }
 
     for $mod.xml.root.elements(:TAG<enum>) -> $e {
+        my $ename = $e.attribs<name>;
 
-        my $ename = fix_name($e.attribs<name>);
-        %EnumRemap{"{$mod.cname} {$e.attribs<name>.Str}"} = $ename;
-        (my $export_ext, my $export_int) = fix_export($e);
+        if %ClassOcclude{$mod.cname ~ ":" ~ $e.attribs<name>}:exists {
 
-        $mod.enums.push:
-        "our class {$ename}Enum$export_ext \{\n" ~
-        "    our enum {$ename}$export_int «\n        " ~
-        (for $e.elements(:TAG<item>) -> $item {
-            state $lastval = -Inf;
-            my $v = $item.elements[0];
-            my $n = fix_valname($item.attribs<name>, $ename);
-            if $v.name eq "bit" {
-                $v = 1 +< $v.nodes[0].text;
+            my $rname = %ClassOcclude{$mod.cname ~ ":" ~ $ename};
+
+            for $e.elements(:TAG<item>) -> $item {
+                state $lastval = -Inf;
+                my $v = $item.elements[0];
+                my $n = $item.attribs<name>;
+                if $v.name eq "bit" {
+                    $v = 1 +< $v.nodes[0].text;
+                }
+                else {
+                    $v = $v.nodes[0].text;
+                }
+                $mod.occlude{$n} = " does $rname\[$v]";
             }
-            else {
-                $v = $v.nodes[0].text;
+
+            $mod.enums.push(qq:to<EOOC>);
+
+            my \%$rname;
+
+            role $rname\[Int \$i] \{
+                multi method Numeric (::?CLASS:U:) \{ \$i }
+                multi method Int (::?CLASS:U:) \{ \$i }
+
+                \%$rname := :\{} unless \%$rname.defined;
+                \%$rname\{\$i} = ::?CLASS;
             }
-            if $v == $lastval + 1 {
-                $lastval = $v; "$n"
+
+            multi sub $rname (Numeric() \$i) is export \{
+                \%$rname\{\$i.Int};
             }
-            else {
-                ":$n\({$lastval = $v})"
+            multi sub $rname ($rname\:D \$r) is export \{
+                \%$rname\{\$r.WHAT.Numeric};
             }
-        }).join("\n        ") ~ "\n»;\n}\n\n";
+            multi sub $rname () is export \{
+                \%$rname.sort.list;
+            }
+
+            class {$rname}::cstruct is repr("CUnion") \{...}
+                
+            EOOC
+        }
+        else {
+            $ename = fix_name($ename);
+            %EnumRemap{"{$mod.cname} {$e.attribs<name>.Str}"} = $ename;
+            (my $export_ext, my $export_int) = fix_export($e);
+
+            $mod.enums.push:
+            "our class {$ename}Enum$export_ext \{\n" ~
+            "    our enum {$ename}$export_int «\n        " ~
+            (for $e.elements(:TAG<item>) -> $item {
+                state $lastval = -Inf;
+                my $v = $item.elements[0];
+                my $n = fix_valname($item.attribs<name>, $ename);
+                if $v.name eq "bit" {
+                    $v = 1 +< $v.nodes[0].text;
+                }
+                else {
+                    $v = $v.nodes[0].text;
+                }
+                if $v == $lastval + 1 {
+                    $lastval = $v; "$n"
+                }
+                else {
+                    ":$n\({$lastval = $v})"
+                }
+            }).join("\n        ") ~ "\n»;\n}\n\n";
+        }
     }
 }
 
@@ -343,7 +397,7 @@ sub build_equation($f) {
    build_op($f.elements[0]);
 }
 
-my %cstructs = "sync:INT64" => "Counter64", "Behavior" => "Behavior";
+my %cstructs = "sync:INT64" => "Counter64", "Behavior" => "Behavior", "NotifyData" => "NotifyData";
 sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is rw") {
     given $f.name {
         when "field"|"exprfield" {
@@ -393,14 +447,12 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
             my $name = $f.attribs<name>;
             my $type = $f.attribs<type>;
             my $has = "has";
-            my $expr = $f.name eq "exprfield"
-                     ?? "\n#{++$TODOP6} exprfield ^^" !! "";
 
             $p{$name}.c_attr = $found_list
-                ?? "# {NCtype($type)} \$.$name $expr unfixed offset"
-                !! "has {NCtype($type)} \$.$name$rw;$expr";
+                ?? "# {NCtype($type)} \$.$name unfixed offset"
+                !! "has {NCtype($type)} \$.$name$rw;";
 
-            $p{$name}.p_attr = "has \$.$name is rw;$expr";
+            $p{$name}.p_attr = "has \$.$name is rw;";
 
             if $found_list {
                 $p{$name}.p2c_code = qq:to<EOPC>;
@@ -417,7 +469,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
             }
             else {
                 $p{$name}.c2p_arg = ":{$name}(\$\!$name)";
-                $p{$name}.p2c_init = "\$\!{$name} = \$p6.{$name};$expr";
+                $p{$name}.p2c_init = "\$\!{$name} = \$p6.{$name};";
             }
 
             if %cstructs{$type}:exists {
@@ -441,7 +493,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                 }
                 else {
                     $p{$name}.c_attr = qq:to<EOCT>;
-                        HAS {$pptype}::cstruct \$.$name$rw;$expr;
+                        HAS {$pptype}::cstruct \$.$name$rw;
                         EOCT
                     $p{$name}.c2p_arg = qq:to<EOPA>;
                         :{$name}({$pptype}.new(nativecast(Pointer[uint8],\$\!$name),
@@ -468,6 +520,14 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                             )
                         EOPC
                 }
+            }
+            if $f.name eq "exprfield" {
+                # Fake it.  There is only one of these in the whole batch.
+                $p<odd_length>.p2c_init = '$!odd_length = +@.string +& 1;';
+                $p<odd_length>.p_attr = |();
+                $p<odd_length>.c2p_arg = |();
+                # This will activate when we do Request c-->perl6
+                $p<string>.c2p_code = "# TODOP6 length * 2 - odd_length";
             }
         }
         when "pad" {
@@ -587,8 +647,35 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                 > {
                     my $nct = NCtype($f.attribs<type>);
                     if $eq ~~ /pstruct\.<!before length<!alpha>>/ {
+                        if $eq ~~ /\(\$pstruct\.(<alpha>+)\s\*\s[\$pstruct\.(<alpha>+)|(\d+)]\)/ {
+                            # multidim array
+                            (my $f1, my $f2) = |($/[0,1])».Str;
+                            if $f1 !~~ /^\d+$/ {
+                                $p{$f1}.p2c_init = "\$\!$f1 = \$p6\.$name.shape[0];";
+                                $p{$f1}.p_attr = |();
+                                $p{$f1}.c2p_arg = |();
+                            }
+                            if $f2 !~~ /^\d+$/ {
+                                $p{$f2}.p2c_init = "\$\!$f2 = \$p6\.$name.shape[1];";
+                                $p{$f2}.p_attr = |();
+                                $p{$f2}.c2p_arg = |();
+                            }
+                            $p{$name}.p2c_code = qq:to<EOCC>;
+                                    \@bufs.push(Buf[$nct].new(|\@.$name));
+                                EOCC
+                            $p{$name}.c2p_code = qq:to<EOPC>;
+                                die("Short Packet") if \$left < (($eq) * nativesizeof($nct));
+                                @args.append:
+                                    "$name",
+                                    ((nativecast(CArray[$nct],Pointer.new(\$p + \$oleft - \$left))[
+                                         (0..^$eq)])[(0..^$eq).rotor(\$pstruct.$f1)]
+                                    );
+                                EOPC
+                            succeed;
+                        }
+
                         $TODOP6++;
-                        $p{$name}.c_attr = "# Dynamic layout: {$type}s $TODOP6 fields other than .length";
+                        $p{$name}.c_attr = "# Dynamic layout: {$type}s $TODOP6 fields other than .length $eq";
                     } else {
                         $p{$name}.c_attr = "# Dynamic layout: {$type}s";
                     }
@@ -1185,15 +1272,25 @@ sub MakeEvents2($mod) {
     for (|$mod.xml.root.elements(:TAG<event>),|$mod.xml.root.elements(:TAG<eventcopy>)) -> $event {
         my params $p;
         my $padnum = -1;
+        my $ename = $event.attribs<name>;
 
         if $event.name eq "eventcopy" {
             $p := %eventcopies{$oname ~ $event.attribs<ref>.Str} //
                 %eventcopies{$event.attribs<ref>.Str};
         }
         else {
-            $p := %eventcopies{$oname ~ $event.attribs<name>.Str};
+            $p := %eventcopies{$oname ~ $ename};
         }
         my $number = $event.attribs<number>;
+
+        if %ClassMultiplex{$mod.cname ~ ":" ~ $ename} -> $multiplex {
+            (my $mxu, my $mxi) = $multiplex.split(":");
+            $p{$mxi}.p2c_init = "\$\!$mxi = +\$p6.$mxu;";
+            $p{$mxu}.p2c_init = "\$\!$mxu\.\"set_\{\$p6.^name.split(\"::\")[*-1]}\"(\$p6.$mxu\.cstruct.nativeize(\$p6.$mxu));";
+            $p{$mxi}.p_attr = |();
+            my $uname = %ClassOcclude{$mod.cname ~ ":" ~ $ename};
+            $p{$mxu}.c2p_arg ~~ s/$uname/$uname\(\$\.$mxi\)/;
+        }
 
         @cstructs.push(qq:to<EOCS>);
 
@@ -1275,6 +1372,7 @@ sub MakeStructs($mod) {
         my @reqfields;
         my params $p .= new;
         my $found_list = 0;
+        my $roles = "";
 
         for $struct.elements -> $e {
             MakeCStructField($p, $e, $padnum, $found_list);
@@ -1325,6 +1423,14 @@ sub MakeStructs($mod) {
         });
         %cstructs{$struct.attribs<name>} = $clname;
 
+        if $mod.occlude{$struct.attribs<name>} {
+            $roles ~= $mod.occlude{$struct.attribs<name>};
+            # recover role name... this could be less cheezy
+            $mod.occlude{$struct.attribs<name>} ~~ /\s(\w+)'['/;
+            my $rname = $/[0];
+            $mod.rolecstruct{$rname}.push($clname);
+        }
+
         my @doc;
         @doc.append(MakeClassDocs($struct, $clname));
 
@@ -1343,7 +1449,7 @@ sub MakeStructs($mod) {
 
         @p6classes.push(qq:to<EO6C>);
             {@doc.join("\n")}
-            our class {$clname} does Struct is export(:DEFAULT, :structs) \{
+            our class {$clname} does Struct$roles is export(:DEFAULT, :structs) \{
 
                 { @cstructs[*-1] }
 
@@ -1662,6 +1768,16 @@ sub Output ($mod) {
     $out.print($mod.enums.join);
     $out.print($mod.typedefs.join);
     $out.print($mod.p6classes.grep({$_ !~~ /TODOP6/}).join);
+
+    for $mod.rolecstruct.kv -> $rname, $ratt {
+        $out.print(
+            "class {$rname}::cstruct \{\n" ~
+            (qq:to<EOAT> for |$ratt).join("\n").indent(4) ~ "\n}\n";
+                HAS $_\:\:cstruct \$\.$_;
+                sub set_$_ ($_\:\:cstruct \$it) \{ \$\!$_ := \$it }
+                EOAT
+        )
+    }
 
     $out.print(qq:to<EOEH>);
         our \$errorcodes = :\{
