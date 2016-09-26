@@ -66,3 +66,29 @@ say +LSBFirst;                     # says 0
 Perl6 core base names.  In order to import these, you must use the
 ":danger" tag -- and you should probably take care to lexically
 contain them.
+
+Certain enums in the XCB API are meant to map integer values to
+classes, e.g. when those classes are part of a union, or when payload
+of a packet can have various related classes.  In this case, instead of
+an enum, these classes are taught to numify to those integers.
+Only the type objects numify.  So to get that numeric value, simply
+use the class name:
+
+```perl6
+use X11::XCB::RandR;
+say +ProviderChange # says 2
+```
+...A subroutine is also provided to translate integers to the appropriate
+class.  With no arguments it outputs all the entries in the map as
+pairs:
+
+```perl6
+use X11::XCB::RandR;
+NotifyData(2).name.say; # says ProviderChange
+NotifyData().elems.say; # says 6
+```
+
+A parameteric role by the same name of the subroutine is mixed into the
+member classes.  Also inside the namespace of that role, ::cstruct
+refers to a CUnion structure composed of all the respective ::cstruct
+of the member classes.
