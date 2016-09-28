@@ -3,7 +3,7 @@ use lib <blib/lib lib>;
 
 use Test;
 
-plan 136;
+plan 151;
 
 use NativeCall;
 use X11::XCB;
@@ -241,24 +241,24 @@ given QueryKeymapReply.new(:keys[^32]) {
   is-deeply $s.keys, $_.keys, "$what roundtrip to perl instance";
 }
 
-given ClientMessageEvent.new(:sequence(0),:window(3),:type(4),:data(Buf[uint32].new(1..5))) {
+given ClientMessageEvent.new(:sequence(0x1234),:window(3),:type(4),:data(Buf[uint32].new(1..5))) {
   my $what = "32-bit ClientMessageEvent";
   ok $_.defined, "$what create perl instance";
 
   my @bufs = (|$_ for .bufs);
 
-  is @bufs, @(|(uint32_bytes($_) for (0,32,3,4,1,2,3,4,5))), "$what bufferizes correctly";
+  is @bufs, @(33,32,|uint16_bytes(0x1234),|(uint32_bytes($_) for (3,4,1,2,3,4,5))), "$what bufferizes correctly";
 
   my $b = Buf.new(@bufs);
   my $c = nativecast(.cstruct,$b);
-  is-deeply $c, .cstruct.new(
-    :0sequence, :32format, :3window, :4type, :1cmd___pad0,
+  is-deeply $c, .cstruct.new(:33response_type, :4660sequence,
+    :32format, :3window, :4type, :1cmd___pad0,
     :2cmd___pad1, :3cmd___pad2, :4cmd___pad3, :5cmd___pad4,
   ), "$what roundtrip to cstruct";
-  my $left = 36;
+  my $left = 32;
   my $s = ClientMessageEvent.new(nativecast(Pointer,$c), :$left, :!free);
   is $left, 0, "$what unpacking subtracts its length correctly";
-  is-deeply $s.keys, $_.keys, "$what roundtrip to perl instance";
+  is-deeply ($s.window, $s.type, $s.data), ($_.window, $_.type, $_.data), "$what roundtrip to perl instance";
 }
 
 given ClientMessageEvent.new(:sequence(0),:window(3),:type(4),:data(Buf[uint16].new(1..10))) {
@@ -267,21 +267,21 @@ given ClientMessageEvent.new(:sequence(0),:window(3),:type(4),:data(Buf[uint16].
 
   my @bufs = (|$_ for .bufs);
 
-  is @bufs, @(|(uint32_bytes($_) for (0,16,3,4)), |(uint16_bytes($_) for 1..10)), "$what bufferizes correctly";
+  is @bufs, @(33,16,0,0,|(uint32_bytes($_) for (3,4)), |(uint16_bytes($_) for 1..10)), "$what bufferizes correctly";
 
   my $b = Buf.new(@bufs);
   my $c = nativecast(.cstruct,$b);
-  is-deeply $c, .cstruct.new(
+  is-deeply $c, .cstruct.new(:33response_type,
     :0sequence, :16format, :3window, :4type, 
     :cmd___pad0(uint16x2_uint32(1,2)),
     :cmd___pad1(uint16x2_uint32(3,4)),
     :cmd___pad2(uint16x2_uint32(5,6)),
     :cmd___pad3(uint16x2_uint32(7,8)),
     :cmd___pad4(uint16x2_uint32(9,10))), "$what roundtrip to cstruct";
-  my $left = 36;
+  my $left = 32;
   my $s = ClientMessageEvent.new(nativecast(Pointer,$c), :$left, :!free);
   is $left, 0, "$what unpacking subtracts its length correctly";
-  is-deeply $s.keys, $_.keys, "$what roundtrip to perl instance";
+  is-deeply ($s.window, $s.type, $s.data), ($_.window, $_.type, $_.data), "$what roundtrip to perl instance";
 }
 
 given ClientMessageEvent.new(:sequence(0),:window(3),:type(4),:data(Buf[uint8].new(1..20))) {
@@ -290,21 +290,86 @@ given ClientMessageEvent.new(:sequence(0),:window(3),:type(4),:data(Buf[uint8].n
 
   my @bufs = (|$_ for .bufs);
 
-  is @bufs, @(|(uint32_bytes($_) for (0,8,3,4)), |(1..20)), "$what bufferizes correctly";
+  is @bufs, @(33,8,0,0,|(uint32_bytes($_) for (3,4)), |(1..20)), "$what bufferizes correctly";
 
   my $b = Buf.new(@bufs);
   my $c = nativecast(.cstruct,$b);
-  is-deeply $c, .cstruct.new(
+  is-deeply $c, .cstruct.new(:33response_type,
     :0sequence, :8format, :3window, :4type, 
     :cmd___pad0(uint16x4_uint8(1,2,3,4)),
     :cmd___pad1(uint16x4_uint8(5,6,7,8)),
     :cmd___pad2(uint16x4_uint8(9,10,11,12)),
     :cmd___pad3(uint16x4_uint8(13,14,15,16)),
     :cmd___pad4(uint16x4_uint8(17,18,19,20))), "$what roundtrip to cstruct";
-  my $left = 36;
+  my $left = 32;
   my $s = ClientMessageEvent.new(nativecast(Pointer,$c), :$left, :!free);
   is $left, 0, "$what unpacking subtracts its length correctly";
-  is-deeply $s.keys, $_.keys, "$what roundtrip to perl instance";
+  is-deeply ($s.window, $s.type, $s.data), ($_.window, $_.type, $_.data), "$what roundtrip to perl instance";
+}
+
+given GetPropertyReply.new(:format(8), :sequence(0x1234),:type(1),:bytes_after(2), :value(array[uint8].new(1..16))) {
+  my $what = "8-bit GetPropertyReply";
+  ok $_.defined, "$what create perl instance";
+  my @bufs = (|$_ for .bufs);
+  is @bufs, @(0, 8, |uint16_bytes(0x1234), |(uint32_bytes($_) for (4,1,2)),|uint32_bytes(16),0 xx 12,|(1..16)), "$what bufferizes correctly";
+
+  my $b = Buf.new(@bufs);
+  my $c = nativecast(.cstruct,$b);
+
+  is-deeply $c, .cstruct.new(
+    :4660sequence, :8format, :2bytes_after, :1type, :16value_len,
+    :0pad0_0, :0pad0_1, :0pad0_2, :0pad0_3, :0pad0_4, :0pad0_5,
+    :0pad0_6, :0pad0_7, :0pad0_8, :0pad0_9, :0pad0_10, :0pad0_11,
+    :length(Int(16 / 4))
+    ), "$what roundtrip to cstruct";
+  my $left = 48;
+  my $s = GetPropertyReply.new(nativecast(Pointer,$c), :$left, :!free);
+  is $left, 0, "$what unpacking subtracts its length correctly";
+  is-deeply ($s.type, $s.bytes_after, $s.value), ($_.type, $_.bytes_after, $_.value), "$what roundtrip to perl instance";
+}
+
+given GetPropertyReply.new(:format(16), :type(1),:bytes_after(2), :value(array[uint16].new(501..516))) {
+  my $what = "16-bit GetPropertyReply";
+  ok $_.defined, "$what create perl instance";
+  my @bufs = (|$_ for .bufs);
+
+  is @bufs, @(0, 16, |uint16_bytes(0), |(uint32_bytes($_) for (8,1,2)),|uint32_bytes(16),0 xx 12,|(501..516)), "$what bufferizes correctly";
+
+  my $b = Buf.new(.bufs[0].values,|(uint16_bytes($_) for 501..516));
+  my $c = nativecast(.cstruct,$b);
+
+  is-deeply $c, .cstruct.new(
+    :16format, :2bytes_after, :1type, :16value_len,
+    :0pad0_0, :0pad0_1, :0pad0_2, :0pad0_3, :0pad0_4, :0pad0_5,
+    :0pad0_6, :0pad0_7, :0pad0_8, :0pad0_9, :0pad0_10, :0pad0_11,
+    :length(Int(2 * 16 / 4))
+    ), "$what roundtrip to cstruct";
+  my $left = 64;
+  my $s = GetPropertyReply.new(nativecast(Pointer,$c), :$left, :!free);
+  is $left, 0, "$what unpacking subtracts its length correctly";
+  is-deeply ($s.type, $s.bytes_after, $s.value), ($_.type, $_.bytes_after, $_.value), "$what roundtrip to perl instance";
+}
+
+given GetPropertyReply.new(:format(32), :type(1),:bytes_after(2), :value(array[uint32].new(66001..66016))) {
+  my $what = "32-bit GetPropertyReply";
+  ok $_.defined, "$what create perl instance";
+  my @bufs = (|$_ for .bufs);
+
+  is @bufs, @(0, 32, |uint16_bytes(0), |(uint32_bytes($_) for (16,1,2)),|uint32_bytes(16),0 xx 12,|(66001..66016)), "$what bufferizes correctly";
+
+  my $b = Buf.new(.bufs[0].values,|(uint32_bytes($_) for 66001..66016));
+  my $c = nativecast(.cstruct,$b);
+
+  is-deeply $c, .cstruct.new(
+    :32format, :2bytes_after, :1type, :16value_len,
+    :0pad0_0, :0pad0_1, :0pad0_2, :0pad0_3, :0pad0_4, :0pad0_5,
+    :0pad0_6, :0pad0_7, :0pad0_8, :0pad0_9, :0pad0_10, :0pad0_11,
+    :length(Int(4 * 16 / 4))
+    ), "$what roundtrip to cstruct";
+  my $left = 96;
+  my $s = GetPropertyReply.new(nativecast(Pointer,$c), :$left, :!free);
+  is $left, 0, "$what unpacking subtracts its length correctly";
+  is-deeply ($s.type, $s.bytes_after, $s.value), ($_.type, $_.bytes_after, $_.value), "$what roundtrip to perl instance";
 }
 
 #given RotatePropertiesRequest.new(:window(0) :atoms(840,841,842,843,844,845,846) :delta(3)) {

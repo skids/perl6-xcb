@@ -21,12 +21,15 @@ our class Connection is export {
     has uint32 $!screen = 0;
     has xcb_query_extension_reply_t $!ext; # should never be freed
     has Channel $.cookies = Channel.new();
+    has Channel $.watch = Channel.new();
     has Channel $.destroying = Channel.new();
     #| Extension base value followed by Error code to type maps from
     #| said extension, pre-sorted by descending base value.
     has $.error_bases is rw = [ 0, $X11::XCB::XProto::errorcodes ];
-    #| Lock for preventing simultaneous access to $.error_bases
+    has $.event_bases is rw = [ 0, $X11::XCB::XProto::eventcodes ];
+    #| Lock for preventing simultaneous access to error/event bases
     has Lock $.error_bases_lock = Lock.new();
+    has Lock $.event_bases_lock = Lock.new();
 
     method flush { xcb_flush($!xcb) }
 
@@ -70,9 +73,10 @@ our class Connection is export {
 
     # Passing these as parameters owns their GC link so we can destroy
     # the parent gracefuly.
-    my sub wait(Channel $cookies, Channel $destroying,
+    my sub wait(Channel $cookies, Channel $watch, Channel $destroying,
                 xcb_connection_t $xcb is raw,
-                $error_bases, $error_bases_lock) {
+                $error_bases, $error_bases_lock,
+                $event_bases, $event_bases_lock) {
 
         use NativeCall;
         constant $null = Pointer.new(0);
@@ -80,13 +84,30 @@ our class Connection is export {
         # Use xcb handle as a sentry value.
         my $sentry = nativecast(Pointer, $xcb);
         my $fd = xcb_get_file_descriptor($xcb);
+        # TODO allow airtight initialization of $watcher
+        my Channel $watcher; # Where to send unowned events
         my %errors;
 
-        my sub destroy {
+        my sub destroy($r?) {
+            my $msg = "Connection has been destroyed";
             while $cookies.poll -> $v {
-                $v.break(Failure.new("Connection has been closed"))
+                $v.break(Failure.new($msg))
+                    if $v ~~ Promise::Vow;
+                $v.fail($msg) if $v ~~ Channel;
             };
+            # XXX race
             $cookies.close;
+	    $r.fail($msg) if $r;
+            while $watcher.poll -> $v {
+                $v.break(Failure.new($msg))
+                    if $v ~~ Promise::Vow;
+                $v.fail($msg) if $v ~~ Channel;
+            };
+            # XXX race
+            $watcher.close;
+            if $watch.defined {
+                $watch.fail($msg);
+            }
             $destroying.close;
             xcb_disconnect($xcb);
         }
@@ -109,13 +130,50 @@ our class Connection is export {
         start { CATCH { $_.say }; react {
             # Handles destroying when nobody is waiting on a Cookie.
             whenever $destroying { destroy }
-            whenever $cookies {
+
+            # Both these channels are functionally equivalent, but
+            # $cookies is used internally for requests.  $watch is
+            # supposed to be used by the API user to change where events
+            # go if they want to (possibly) not wait for cookies to
+            # finish before that happens.
+            whenever $watch|$cookies -> $_ is copy {
 
                 my Channel $responses;
                 my Promise $sent;
                 my $follow-after;
 
                 loop {
+
+                    my sub running_poll {
+                        $watch.poll orelse $cookies.poll
+                    }
+
+                    # Check for shutdown
+                    if $destroying.poll {
+                        destroy($sent);
+                        last
+                    }
+                    xcb_select_r($fd, 100000);
+                    # Were we shutdown while waiting?
+                    if $destroying.poll {
+                        destroy($sent);
+                        last
+                    }
+
+                    # Values that alter where unowned events are sent
+                    if $_ ~~ Int {
+                        # Turn off events (discard them)
+                        $watcher.close if ($watcher.defined);
+                        $watcher = Nil;
+                        last;
+                    }
+                    if $_ ~~ Channel {
+                        # Change the channel on which unowned events are queued
+                        $_.send($watcher) if ($watcher.defined); # For chaining
+                        $watcher = $_;
+                        $_ = running_poll;
+			next;
+                    }
 
                     my Pointer $e = $sentry.clone;
                     my Pointer $r = $sentry.clone;
@@ -124,24 +182,46 @@ our class Connection is export {
 
                     # This must always be called before xcb_poll_for_reply or
                     # xcb_poll_for_reply will not work. :-/
-                    my $ev = xcb_poll_for_event($xcb);
-                    if $ev {
-                        my class gev is repr("CStruct") {
-                           has uint8 $.response_type;
-                           has uint8 $.code;
-                           has uint16 $.seq;
+                    while xcb_poll_for_event($xcb) -> $ev {
+                        # This is generic enough to use for errors, too.
+                        my $gev = nativecast(X11::XCB::Event::cstruct, $ev);
+                        if $gev.code eq 0 {
+                            # An error.  Despite what the API docs say it
+                            # can indeed be for a reply we requested without the
+                            # checked flag set, maybe even this one.  Add it to
+                            # the list, which is protected via the whenever.
+                            %errors{$gev.sequence} = $ev;
                         }
-                        my $gev = nativecast(gev, $ev);
-                        if $gev.response_type eq 0 {
-                           # An error.  Despite what the API docs say it
-                           # can indeed be for an event we requested without the
-                           # checked flag set, maybe even this one.  Add it to the
-                           # list, which is protected via the whenever.
-                           %errors{$gev.seq} = $ev;
+                        # XXX workaround for negative uint8s.  Needs RT.
+                        elsif ($gev.code +& 0x7f) > 1 {
+                            # An event.  If we have a watcher, use it.
+                            if $watcher.defined {
+
+                                my class eventstub does X11::XCB::Event[0] { 
+                                    method cstruct { X11::XCB::Event::cstruct };
+                                }
+
+                                my $left = Inf;
+                                # TODO thread, serialize, extension event classes
+                                my $res = eventstub.subclass(
+                                    nativecast(Pointer,$ev), :$left, :free,
+                                    :$event_bases, :$event_bases_lock);
+                                $watcher.send($res)
+                            }
+                            else {
+                                X11::XCB::xcb_free($ev);
+                            }
                         }
-                        elsif $gev.response_type eq 2 {
-                           # TODO events
+                        else {
+                            "primary code 128 or 129... do what now?".note;
+                            X11::XCB::xcb_free($ev);
                         }
+                    }
+
+                    unless $_.defined {
+                        last unless $watcher.defined;
+                        $_ = running_poll;
+                        next;
                     }
 
                     my $status = xcb_poll_for_reply($xcb, .promise.sequence, $r, $e);
@@ -171,7 +251,9 @@ our class Connection is export {
                                     $p.break($ev === Any ?? $e2 !! $ev)
                                 }
                             }
-                            last;
+                            last unless $watcher.defined;
+                            $_ = running_poll;
+                            next;
                         }
                         elsif $r == $null {
                             # Definitively no more results.
@@ -191,7 +273,9 @@ our class Connection is export {
                                     $p.break($ev === Any ?? "No Response" !! $ev);
                                 }
                             };
-                            last;
+                            last unless $watcher.defined;
+                            $_ = running_poll;
+                            next;
                         }
                         else {
                             if ($sent.defined) {
@@ -238,19 +322,17 @@ our class Connection is export {
                     elsif ($sent.defined) {
                         my $c = $responses;
                         $sent.then({$c.close});
-                        last;
+                        last unless $watcher.defined;
+                        $_ = running_poll;
+                        next;
                     }
-                    # Nothing yet.  Yield till there might be.
-                    # But first check for shutdown
-                    if $destroying.poll { destroy; last } # TODO responses
-                    xcb_select_r($fd, 100000);
-                    # Were we shutdown while destroying?
-                    if $destroying.poll { destroy; last } # TODO responses
                 }
             }
         }}
     }
-    has $.waiter = wait($!cookies, $!destroying, $!xcb, $!error_bases, $!error_bases_lock);
+    has $.waiter = wait($!cookies, $!watch, $!destroying, $!xcb,
+                        $!error_bases, $!error_bases_lock,
+                        $!event_bases, $!event_bases_lock);
 
     method DESTROY {
         $.res_ask.close;

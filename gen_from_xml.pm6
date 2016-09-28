@@ -423,7 +423,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                                     nativecast(CArray[uint8], self)[12..^32];
                                 )
                             }
-                            when 8 {
+                            when 16 {
                                 Buf[uint16].new(
                                     nativecast(CArray[uint16], self)[6..^16];
                                 )
@@ -590,6 +590,41 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                 my $name = $f.attribs<name>;
                 my $type = $f.attribs<type>;
 
+                if $type eq "void" and $eq ~~ /pstruct\.(\w+)\s\*<-alpha>*\$pstruct.format.*div\s8/ {
+                    # Typical Properties handling, map to typed array
+                    my $cf = $/[0].Str;
+                    $p<format>.p_attr = |();
+                    $p<format>.p2c_init = "\$\!format = nativesizeof(\$p6.$name.of) * 8;";
+                    $p<format>.c2p_arg = |();
+                    $p<format>.c2p_code = |();
+                    $p<format>.p2c_code = |();
+                    $p{$cf}.p_attr = |();
+                    $p{$cf}.p2c_init = qq:to<EOPC>;
+                        die 'length exceeds field $cf' if \$p6.$name.elems > {$cf}___maxof;
+                        \$\!$cf = \$p6.$name.elems;
+                        EOPC
+                    $p{$cf}.c2p_arg = |();
+                    $p{$cf}.c2p_code = |();
+                    $p{$cf}.p2c_code = |();
+                    $p{$name}.p2c_code = "\@bufs.push(Buf[\$.$name.of].new(\$.$name.values));";
+                    $p{$name}.p_attr = "has \$\.$name is rw; # XXX Should be @ but has problems";
+                    $p{$name}.c2p_code = qq:to<EOCC>;
+                        die "Short Packet" if \$left < $eq;
+                        \{
+                            my \$t = do given \$pstruct.format \{
+                                when 8 \{ uint8 }
+                                when 16 \{ uint16 }
+                                when 32 \{ uint32 }
+                                default \{ die "Bad format value" }
+                            };
+                            @args.append:
+                                "$name",
+                                array[\$t].new(nativecast(CArray[\$t],Pointer.new(\$p + \$oleft - \$left))[^\$pstruct.$cf]);
+                        }
+                        \$left -= $eq;
+                        EOCC
+                    succeed
+                } 
                 if ($eq ~~ /TODOP6/) {
                     $TODOP6++;
                     $p{$TODOP6}.c_attr = "# $TODOP6 complicated $_ ($eq) of {$f.attribs<type>}";
@@ -697,6 +732,33 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                     $p{$TODOP6}.c_attr = "# $TODOP6 NYI $_";
                     $p{$TODOP6}.p_attr = "# $TODOP6 NYI $_";
                 }
+            }
+            elsif $f.elements(:TAG<value>) and $f.attribs<type> eq "char" and $f.attribs<name> eq "event"  {
+                # Special case SendEvent
+                $p<event>.p_attr = q:to<EOPA>;
+                    has $.event;
+                    EOPA
+                $p<event>.p2c_code = q:to<EOSP>;
+                    if $.event ~~ Buf {
+                        die('As a buffer $.event must have 32 bytes exactly')
+                            unless $.event.bytes == 32;
+                        @bufs.push($.event);
+                    }
+                    else {
+                        die('Should have an Event or a Buf for $.event')
+                            unless $.event ~~ Buf|Event;
+                        my @bytes = |(|nativecast(CArray[uint8],$_)[^$_.bytes]
+                                      for $.event.bufs);
+                        @bufs.push(Blob.new(|@bytes));
+                    }
+                    EOSP
+                $p<event>.c2p_code = q:to<EOSC>;
+                    die "Short packet" unless $left >= 32;
+                    @args.append: "$name",
+                        (Buf.new(nativecast(CArray[uint8], Pointer.new(\$p + \$oleft - \$left))[^32]
+                        ).decode("utf8"));
+                    $left -= 32;
+                    EOSC
             }
             elsif $f.elements(:TAG<value>) -> [ $val ] {
                 my $frval = $val.contents.Str.Int;
@@ -1167,7 +1229,7 @@ sub MakeErrors2($mod) {
                         }
                     }
                     method nativeize(\$p6) \{
-                        \$\!sequence = \$p6.sequence;
+                        \$\!sequence = \$p6.sequence // 0;
             {$p.params».p2c_init.join("\n").indent(12)}
                     }
                 };
@@ -1292,14 +1354,22 @@ sub MakeEvents2($mod) {
             $p{$mxu}.c2p_arg ~~ s/$uname/$uname\(\$\.$mxi\)/;
         }
 
+        my $lift = 'has uint8 $.event_code is rw;';
+        my $start = 1;
+        if $p.params[0].c_attr !~~ /pad0/ {
+            $lift = $p.params[0].c_doc ~ "\n" ~ $p.params[0].c_attr;
+        }
+        elsif $p.params[0].c_attr ~~ /___pad/ {
+            $start = 0;
+        }
         @cstructs.push(qq:to<EOCS>);
 
                 our class cstruct is repr("CStruct") \{
 
                     has uint8 \$.response_type is rw;
-                    has uint8 \$.event_code is rw;
+            $lift.indent(8)
                     has uint16 \$.sequence is rw;
-            {({ |(.c_doc, .c_attr) } for $p.params).join("\n").indent(8)}
+            {({ |(.c_doc, .c_attr) } for $p.params[$start..^*]).join("\n").indent(8)}
 
                     method Hash \{
                         \{
@@ -1308,7 +1378,8 @@ sub MakeEvents2($mod) {
                         }
                     }
                     method nativeize(\$p6) \{
-                        \$\!sequence = \$p6.sequence;
+                        \$\!response_type = \$p6.event_code;
+                        \$\!sequence = \$p6.sequence // 0;
             {$p.params».p2c_init.join("\n").indent(12)}
                     }
                 };
@@ -1331,7 +1402,7 @@ sub MakeEvents2($mod) {
 
                 { @cstructs[*-1] }
 
-                has \$.sequence;
+                has \$.sequence is rw;
             {({ |(.p_doc, .p_attr) } for $p.params).join("\n").indent(4)}
 
                 method child_bufs \{
@@ -1539,7 +1610,7 @@ sub MakeReplies($mod) {
         my $p6args = "";
 
         my $clname = $req.attribs<name>;
-        $clname = $mod.modname ~ $clname
+        $clname = $oname ~ $clname
             if $clname eq any <
                 DestroyContext QueryVersion QueryExtension ListProperties
                 CreateCursor GetVersion QueryBestSize SelectInput Bell
@@ -1596,10 +1667,12 @@ sub MakeReplies($mod) {
 
                         method Hash \{
                             \{
+                                :sequence(\$\!sequence),
                 {$p.params».c2p_arg.join(",\n").indent(16)}
                             }
                         }
                         method nativeize(\$p6) \{
+                            \$\!sequence = \$p6.sequence // 0;
                 {$p.params».p2c_init.join("\n").indent(12)}
                         }
                     };
@@ -1708,7 +1781,7 @@ sub MakeRequests($mod) {
             EOCS
 
         my $clname = $req.attribs<name>;
-        $clname = $mod.modname ~ $clname
+        $clname = $oname ~ $clname
             if $clname eq any <
                 DestroyContext QueryVersion QueryExtension ListProperties
                 CreateCursor GetVersion QueryBestSize SelectInput Bell

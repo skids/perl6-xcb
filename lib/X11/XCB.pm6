@@ -330,7 +330,8 @@ our role Error[$error_code] is export(:internal) {
             has uint8 $.error_code;
         }
         die "Packet too short" unless $left >= nativesizeof(errorstub);
-        my $code = nativecast(errorstub, $p).error_code;
+        # XXX workaround negative uint8.  Needs RT
+        my $code = nativecast(errorstub, $p).error_code +& 0xff;
         my $cl;
         $error_bases_lock.protect: {
             for |$error_bases -> $k, $v {
@@ -345,6 +346,12 @@ our role Error[$error_code] is export(:internal) {
             if $cl === Any;
         $cl.new($p, :$left, :$free);
     }
+}
+
+our class Event::cstruct is repr("CStruct") {
+    has uint8 $.code;
+    has uint8 $.detail;
+    has uint16 $.sequence;
 }
 
 our role Event[$event_code] is export(:internal) {
@@ -413,12 +420,8 @@ our role Event[$event_code] is export(:internal) {
     method subclass (Pointer $p, :$event_bases!, :$event_bases_lock!,
                      :$left! is rw, :$free = True) {
 
-        my class eventstub is repr("CStruct") {
-            has uint8 $!reponse_type;
-            has uint8 $.event_code;
-        }
-        die "Packet too short" unless $left >= nativesizeof(eventstub);
-        my $code = nativecast(eventstub, $p).event_code;
+        die "Packet too short" unless $left >= nativesizeof(Event::cstruct);
+        my $code = nativecast(Event::cstruct, $p).code +& 0x7f;
         my $cl;
         $event_bases_lock.protect: {
             for |$event_bases -> $k, $v {
@@ -558,8 +561,7 @@ our role Reply [$opcode] is export(:internal) {
             # XXX graceful way to decont without NQP or assuming listiness?
             %childinits{$k} := nqp::decont(v);
         }
-        my $res = ::?CLASS.bless(:sequence(+$cs.sequence),
-                                 |%childinits);
+        my $res = ::?CLASS.bless(|%childinits);
         xcb_free $p if $free;
         $res;
     }
