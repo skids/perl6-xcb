@@ -3,6 +3,9 @@ unit module X11;
 use X11::XCB;
 use X11::XCB::XProto;
 
+# Workaround for Promise::Vow invisibility.  Needs RT
+my constant Vow = Promise.new.vow.WHAT;
+
 our class AuthInfo is export {
     has xcb_auth_info_t $.xcb handles <<name namelen data datalen>>;
     method BUILD (:$name, :$namelen, :$data, :$datalen) {
@@ -14,6 +17,8 @@ our class AuthInfo is export {
     }
 }
 
+my constant @ganr = buf16.new(0x1717,2), buf32.new(4); # abuse pad for endian
+
 our class Connection is export {
     has xcb_connection_t $.xcb;
     has $.Setup;
@@ -21,8 +26,8 @@ our class Connection is export {
     has uint32 $!screen = 0;
     has xcb_query_extension_reply_t $!ext; # should never be freed
     has Channel $.cookies = Channel.new();
-    has Channel $.watch = Channel.new();
     has Channel $.destroying = Channel.new();
+    has Channel $!watch = Channel.new();
     #| Extension base value followed by Error code to type maps from
     #| said extension, pre-sorted by descending base value.
     has $.error_bases is rw = [ 0, $X11::XCB::XProto::errorcodes ];
@@ -32,6 +37,22 @@ our class Connection is export {
     has Lock $.event_bases_lock = Lock.new();
 
     method flush { xcb_flush($!xcb) }
+
+    #| Change the Channel to which unowned events are sent.
+    #| Returns the new Channel.  The first value, before any
+    #| events, sent on the new Channel, will be the old Channel
+    #| that was just replaced, or if none, False.
+    method watch(Channel:D $w = Channel.new --> Channel) {
+        $!watch.send($w);
+        $w;
+    }
+
+    #| Stop watching this connection for unowned events.
+    #| If there was a Channel to which events were being sent,
+    #| it is closed.
+    method unwatch(--> Nil) {
+        $!watch.send(False);
+    }
 
     method Setup handles<protocol_major_version protocol_minor_version
                          release_number resource_id_base resource_id_mask
@@ -46,7 +67,7 @@ our class Connection is export {
     }
 
     # Passing these as parameters owns their GC link so we can destroy
-    # the parent gracefuly.
+    # the parent object gracefuly.
     my sub resource_server(Channel $scrap, Channel $ask,
                            xcb_connection_t $c is raw --> Channel) {
         my @scrapheap;
@@ -92,7 +113,7 @@ our class Connection is export {
             my $msg = "Connection has been destroyed";
             while $cookies.poll -> $v {
                 $v.break(Failure.new($msg))
-                    if $v ~~ Promise::Vow;
+                    if $v ~~ Vow; # XXX
                 $v.fail($msg) if $v ~~ Channel;
             };
             # XXX race
@@ -100,7 +121,7 @@ our class Connection is export {
 	    $r.fail($msg) if $r;
             while $watcher.poll -> $v {
                 $v.break(Failure.new($msg))
-                    if $v ~~ Promise::Vow;
+                    if $v ~~ Vow; # XXX
                 $v.fail($msg) if $v ~~ Channel;
             };
             # XXX race
@@ -127,208 +148,211 @@ our class Connection is export {
                                  :bad_value($res.bad_value));
         }
 
-        start { CATCH { $_.say }; react {
-            # Handles destroying when nobody is waiting on a Cookie.
-            whenever $destroying { destroy }
+        start { CATCH { $_.say };
+            my Channel $responses; # channel we are sending responses on
+            my Promise $sent;      # vow from cookie we are working on
+            my $kick = 0;          # keepalive counter for void requests
+            loop {
+                # For now just treat the two channels the same.
+                # Later we may restrict what values we take on each.
+                my sub running_poll { $watch.poll orelse $cookies.poll }
 
-            # Both these channels are functionally equivalent, but
-            # $cookies is used internally for requests.  $watch is
-            # supposed to be used by the API user to change where events
-            # go if they want to (possibly) not wait for cookies to
-            # finish before that happens.
-            whenever $watch|$cookies -> $_ is copy {
-
-                my Channel $responses;
-                my Promise $sent;
-                my $follow-after;
-
-                loop {
-
-                    my sub running_poll {
-                        $watch.poll orelse $cookies.poll
-                    }
-
-                    # Check for shutdown
-                    if $destroying.poll {
-                        destroy($sent);
-                        last
-                    }
-                    xcb_select_r($fd, 100000);
-                    # Were we shutdown while waiting?
-                    if $destroying.poll {
-                        destroy($sent);
-                        last
-                    }
-
-                    # Values that alter where unowned events are sent
-                    if $_ ~~ Int {
+                # Check for shutdown
+                if $destroying.poll {
+                    destroy($sent);
+                    last
+                }
+                xcb_select_r($fd, 100000); # XXX adjust 100000
+                # Were we shutdown while waiting?
+                if $destroying.poll {
+                    destroy($sent);
+                    last
+                }
+                without $_ {
+                    $kick = 0;
+                    $_ = running_poll;
+                }
+                with $_ {
+                    if $_ === False {
+                        $kick = 0;
                         # Turn off events (discard them)
                         $watcher.close if ($watcher.defined);
                         $watcher = Nil;
-                        last;
+                        $_ = Nil;
+                        next;
                     }
-                    if $_ ~~ Channel {
-                        # Change the channel on which unowned events are queued
-                        $_.send($watcher) if ($watcher.defined); # For chaining
+                    elsif $_ ~~ Channel {
+                        $kick = 0;
+                        # Change the channel where unowned events are queued
+                        # Send the old one back as first value, for chaining
+                        $_.send($watcher.defined ?? $watcher !! False);
                         $watcher = $_;
-                        $_ = running_poll;
-			next;
+                        $_ = Nil;
+                        next;
                     }
-
-                    my Pointer $e = $sentry.clone;
-                    my Pointer $r = $sentry.clone;
-
-                    xcb_flush($xcb);
-
-                    # This must always be called before xcb_poll_for_reply or
-                    # xcb_poll_for_reply will not work. :-/
-                    while xcb_poll_for_event($xcb) -> $ev {
-                        # This is generic enough to use for errors, too.
-                        my $gev = nativecast(X11::XCB::Event::cstruct, $ev);
-                        if $gev.code eq 0 {
-                            # An error.  Despite what the API docs say it
-                            # can indeed be for a reply we requested without the
-                            # checked flag set, maybe even this one.  Add it to
-                            # the list, which is protected via the whenever.
-                            %errors{$gev.sequence} = $ev;
+                    elsif $_ !~~ Vow {
+                        $kick = 0;
+                        "Only send Cookie Vows, Channels, or False here".note;
+                        $_ = Nil;
+                        next;
+                    }
+                    else {
+                        # Do a GetAtomName on 4(ATOM) to jog the pipe.
+                        if $kick++ > 10 {
+                            GetAtomNameRequest.xcb_send_request($xcb,@ganr);
+                            $kick = 0;
                         }
-                        # XXX workaround for negative uint8s.  Needs RT.
-                        elsif ($gev.code +& 0x7f) > 1 {
-                            # An event.  If we have a watcher, use it.
-                            if $watcher.defined {
+                    }
+                }
 
-                                my class eventstub does X11::XCB::Event[0] { 
-                                    method cstruct { X11::XCB::Event::cstruct };
-                                }
+                my Pointer $e = $sentry.clone;
+                my Pointer $r = $sentry.clone;
 
-                                my $left = Inf;
-                                # TODO thread, serialize, extension event classes
-                                my $res = eventstub.subclass(
-                                    nativecast(Pointer,$ev), :$left, :free,
-                                    :$event_bases, :$event_bases_lock);
-                                $watcher.send($res)
+                xcb_flush($xcb);
+
+                # This must always be called before xcb_poll_for_reply or
+                # xcb_poll_for_reply will not work. :-/
+                while xcb_poll_for_event($xcb) -> $ev {
+                    # This is generic enough to use for errors, too.
+                    my $gev = nativecast(X11::XCB::Event::cstruct, $ev);
+                    if $gev.code eq 0 {
+                        # An error.  Despite what the API docs say it
+                        # can indeed be for a reply we requested without the
+                        # checked flag set, maybe even this one.  Add it to
+                        # the list, which is protected via the whenever.
+                        %errors{$gev.sequence} = $ev;
+                    }
+                    elsif ($gev.code +& 0x7f) > 1 {
+                        # An event.  If we have a watcher, use it.
+                        if $watcher.defined {
+
+                            my class eventstub does X11::XCB::Event[0] { 
+                                method cstruct { X11::XCB::Event::cstruct };
                             }
-                            else {
-                                X11::XCB::xcb_free($ev);
-                            }
+
+                            my $left = Inf;
+                            # TODO thread, serialize, extension event classes
+                            my $res = eventstub.subclass(
+                                nativecast(Pointer,$ev), :$left, :free,
+                                :$event_bases, :$event_bases_lock);
+                            $watcher.send($res)
                         }
                         else {
-                            "primary code 128 or 129... do what now?".note;
                             X11::XCB::xcb_free($ev);
                         }
                     }
-
-                    unless $_.defined {
-                        last unless $watcher.defined;
-                        $_ = running_poll;
-                        next;
-                    }
-
-                    my $status = xcb_poll_for_reply($xcb, .promise.sequence, $r, $e);
-                    if $status {
-                        # Definitive answer
-                        if $r == $sentry or $e == $sentry {
-                            die("BUG: xcb_poll_for_reply returned 1 without" ~
-                                " altering both reply and error.\n" ~
-                                "BUG: This should be impossible.  API changed?");
-                        }
-                        if $e !== $null {
-                            # This will probably never happen given the proclivity
-                            # of this API to send all events above.
-                            if ($sent.defined) { 
-                                my $c = $responses;
-                                my $e2 = $e;
-                                $sent.then({
-                                    my $ev = error_to_exception($e2);
-                                    $c.fail($ev === Any ?? $e2 !! $ev)
-                                });
-                            }
-                            else {
-                                my $p = $_;
-                                my $e2 = $e;
-                                start {
-                                    my $ev = error_to_exception($e2);
-                                    $p.break($ev === Any ?? $e2 !! $ev)
-                                }
-                            }
-                            last unless $watcher.defined;
-                            $_ = running_poll;
-                            next;
-                        }
-                        elsif $r == $null {
-                            # Definitively no more results.
-                            if ($sent.defined) {
-                                my $ev = %errors{.promise.sequence +& 0xffff}:delete;
-                                my $c = $responses;
-                                $sent.then({
-                                    $ev = error_to_exception($ev);
-                                    $ev === Any ?? $c.close !! $c.fail($ev);
-                                })
-                            }
-                            else {
-                                my $ev = %errors{.promise.sequence +& 0xffff}:delete;
-                                my $p = $_;
-                                start {
-                                    $ev = error_to_exception($ev);
-                                    $p.break($ev === Any ?? "No Response" !! $ev);
-                                }
-                            };
-                            last unless $watcher.defined;
-                            $_ = running_poll;
-                            next;
-                        }
-                        else {
-                            if ($sent.defined) {
-                                my $c = $responses;
-                                my $p = $_;
-                                my $r2 = $r;
-                                $sent .= then(
-                                    {
-                                        $c.send: $p.promise.reply_type.new(
-                                            $r2, :left(Int), :free
-                                        );
-                                    }
-                                );
-                            }
-                            else {
-                                # We could just build a list but a Channel allows
-                                # multiple workers to respond.  Don't know if there
-                                # are any actual use cases for this, though.
-                                $responses = Channel.new;
-                                my $c = $responses;
-                                my $p = $_;
-                                my $r2 = $r;
-                                $sent = start {
-                                    $p.keep($c);
-                                    $c.send: $p.promise.reply_type.new(
-                                        $r2, :left(Int), :free
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    elsif $r !== $sentry or $e !== $sentry {
-                        die("BUG: xcb_poll_for_reply returned 0 while" ~
-                            " altering either the reply or the error.\n" ~
-                            "BUG: This should be impossible.  API changed?");
-                    }
-                    # This is a pretty messed up interface.  The response when a
-                    # reply is pending and the response when all replies have
-                    # been fully read are the same.  But, the input queue does
-                    # not publish the replies for a request until they are all
-                    # received so we'll never get blocking in the middle
-                    # of a string of replies.  So, we can just use state to
-                    # figure out what happened.
-                    elsif ($sent.defined) {
-                        my $c = $responses;
-                        $sent.then({$c.close});
-                        last unless $watcher.defined;
-                        $_ = running_poll;
-                        next;
+                    else {
+                        "primary code 128 or 129... do what now?".note;
+                        X11::XCB::xcb_free($ev);
                     }
                 }
+
+                without $_ {
+                    $_ = running_poll;
+                    next;
+                }
+
+                my $status = xcb_poll_for_reply($xcb, .promise.sequence, $r, $e);
+                if $status {
+                    $kick = 0;
+
+                    # Definitive answer
+                    if $r == $sentry or $e == $sentry {
+                        die("BUG: xcb_poll_for_reply returned 1 without" ~
+                            " altering both reply and error.\n" ~
+                            "BUG: This should be impossible.  API changed?");
+                    }
+                    if $e !== $null {
+                        # This will probably never happen given the proclivity
+                        # of this API to send all events above.
+                        if ($sent.defined) {
+                            my $c = $responses;
+                            my $e2 = $e;
+                            $sent.then({
+                                my $ev = error_to_exception($e2);
+                                $c.fail($ev === Any ?? $e2 !! $ev)
+                            });
+                        }
+                        else {
+                            my $p = $_;
+                            my $e2 = $e;
+                            start {
+                                my $ev = error_to_exception($e2);
+                                $p.break($ev === Any ?? $e2 !! $ev)
+                            }
+                        }
+                        next;
+                    }
+                    elsif $r == $null {
+                        # Definitively no more results.
+                        if ($sent.defined) {
+                            my $ev = %errors{.promise.sequence +& 0xffff}:delete;
+                            my $c = $responses;
+                            $sent.then({
+                                $ev = error_to_exception($ev);
+                                $ev === Any ?? $c.close !! $c.fail($ev);
+                            })
+                        }
+                        else {
+                            my $ev = %errors{.promise.sequence +& 0xffff}:delete;
+                            my $p = $_;
+                            start {
+                                $ev = error_to_exception($ev);
+                                $p.break($ev === Any ?? "No Response" !! $ev);
+                            }
+                        };
+                        $sent = Nil;
+                        $_ = running_poll;
+                        next;
+                    }
+                    else {
+                        if ($sent.defined) {
+                            my $c = $responses;
+                            my $p = $_;
+                            my $r2 = $r;
+                            $sent .= then({
+                                $c.send: $p.promise.reply_type.new(
+                                    $r2, :left(Int), :free
+                                );
+                            });
+                        }
+                        else {
+                            # We could just build a list but a Channel allows
+                            # multiple workers to respond.  Don't know if there
+                            # are any actual use cases for this, though.
+                            $responses = Channel.new;
+                            my $c = $responses;
+                            my $p = $_;
+                            my $r2 = $r;
+                            $sent = start {
+                                $p.keep($c);
+                                $c.send: $p.promise.reply_type.new(
+                                    $r2, :left(Int), :free
+                                );
+                            }
+                        }
+                    }
+                }
+                elsif $r !== $sentry or $e !== $sentry {
+                    die("BUG: xcb_poll_for_reply returned 0 while" ~
+                        " altering either the reply or the error.\n" ~
+                        "BUG: This should be impossible.  API changed?");
+                }
+                # This is a pretty messed up interface.  The response when a
+                # reply is pending and the response when all replies have
+                # been fully read are the same.  But, the input queue does
+                # not publish the replies for a request until they are all
+                # received so we'll never get blocking while pending in the
+                # middle of a string of replies.  We can just use state to
+                # figure out what happened.
+                elsif ($sent.defined) {
+                    my $c = $responses;
+                    $sent.then({$c.close});
+                    $sent = Nil;
+                    $_ = running_poll;
+                }
             }
-        }}
+        }
     }
     has $.waiter = wait($!cookies, $!watch, $!destroying, $!xcb,
                         $!error_bases, $!error_bases_lock,
@@ -468,74 +492,4 @@ our class Window is export {
     }
 
 }
-
-
-#my class xcb_intern_atom_reply_t is repr("CStruct") {
-#    has uint8 $.response_type;
-#    has uint8 $.pad0_0;
-#    has uint16 $.sequence;
-#    has uint32 $.length;
-#    has uint32 $.atom;
-#}
-#use NativeCall;
-#my sub xcb_intern_atom (xcb_connection_t $c,
-#                 uint8 $o,
-#                 uint16 $l,
-#                 Str $n --> uint32) is native("xcb") { }
-
-#my sub xcb_intern_atom_reply (xcb_connection_t $c,
-#                       uint32 $cookie,
-#                       Pointer $e is rw) is native("xcb") { }
-
-#method ia {
-#  use NativeCall :types;
-#  my Pointer $p;
-#  my Pointer $e;
-#
-#  my $x = InternAtomRequest.new(:name(""),:!only_if_exists);
-#  my $ret = $x.send(self);
-##  my $seq1 = $x.xcb_send_request($!xcb, $x.bufs);
-##  xcb_flush($!xcb);
-##  $seq1.say;
-##  my $ret = Cookie.new(:sequence($seq1), :reply_type($x.reply));
-##my $v = $ret.vow;
-##:$v.say;
-##  $.cookies.send($v);
-#  xcb_flush($!xcb);
-#  $ret;
-#}
-
-#method gs {
-#  xcb_get_setup($!xcb);
-#}
-
-#method wfe {
-#start {
-#$!xcb.perl.say;
-#xcb_wait_for_event($!xcb).perl.say;
-#"got".say;
-#}
-#}
-
-#}
-
-
-
-
-#my $c = Connection.new();
-#sleep 1;
-
-#{
-#use NativeCall;
-#my $pr = $c.ia;
-#$pr.say;
-#my $p = await $pr;
-#$c.ia;
-#$p.list.say;
-#}
-
-#42.say;
-
-#$c = Nil;
-#sleep 2;
 

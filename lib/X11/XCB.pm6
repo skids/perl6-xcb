@@ -613,6 +613,8 @@ our role Request [$opcode, $ext, $isvoid] is export(:internal) {
         (|@bufs, padbuf($pad));
     }
 
+    # This method does not use self (and we rely on that
+    # elsewhere.)  Maybe should make it into a sub.
     method xcb_send_request($c, @bufs) {
         my $vecs = Buf.new(0 xx +@bufs * nativesizeof(xcb_iovec));
         # XXX safe to use GC memory like this?

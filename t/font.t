@@ -48,7 +48,7 @@ $lf = ListFontsRequest.new(:max_names(100), :pattern<*-fixed-*>);
 my $lfc = $lf.send($c);
 $fl = await($lfc).list[0];
 ok $fl ~~ ListFontsReply,
-    "Did a ListFontsRequestwhile QueryFont was building object";
+    "Did a ListFontsRequest while QueryFont was building object";
 ok await($p).receive.char_infos[*-1] ~~ Charinfo,
     "Got Font and it has array of Charinfo";
 await $voidwait;

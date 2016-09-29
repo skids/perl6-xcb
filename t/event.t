@@ -3,18 +3,19 @@ use lib <blib/lib lib>;
 
 use Test;
 
-plan 1;
+plan 4;
 
 use NativeCall;
 use X11;
 use X::Protocol::X11;
+use X11::XCB::XProto;
 
 my $c = Connection.new;
 
 my Channel $w .= new;
-$c.watch.send($w);
+$c.watch($w);
 
-use X11::XCB::XProto;
+is $w.receive, False, "Got False back from first .watch call";
 
 my $wid = Resource.new(:from($c));
 
@@ -42,11 +43,31 @@ my $res = $w.receive;
 # finagle the sequence number
 $cme.sequence = $res.sequence;
 is-deeply $res, $cme, "Received event from SendEvent";
+
 my Channel $w2 .= new;
-$c.watch.send($w2).WHICH;
-is $w.receive.WHICH, $w.WHICH, "Got old channel back when replacing";
+$c.watch($w2);
+is $w2.receive.WHICH, $w.WHICH, "Got old channel back when replacing";
 $se.send($c);
 $res = $w2.receive;
 # finagle the sequence number
 $cme.sequence = $res.sequence;
 is-deeply $res, $cme, "Received event from SendEvent on new channel";
+$c.unwatch;
+await $w2.closed;
+ok $w2.closed, "Channel gets closed when unwatching";
+$se.send($c);
+$w2 = Channel.new;
+$c.watch($w2);
+is $w2.receive, False, "Got False back from .watch after .unwatch";
+my $async = 0;
+$res = 0;
+my $t = start {
+    $res = $w2.receive;
+    $async = 1;
+}
+sleep 0.1;
+ok $async == 0, "Nothing was queued while unwatched";
+$se.send($c);
+await $t;
+$cme.sequence = $res.sequence;
+is-deeply $res, $cme, "Got event sent from another thread";
