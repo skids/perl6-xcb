@@ -128,7 +128,7 @@ sub MakeMod ($xml) {
         $prologue ~= qq:to<EOE>;
 
             our \$xcb_{$cname}_id is export(:internal) :=
-                cglobal("{$cname}", "xcb_{$cname}_id", xcb_extension_t);
+                cglobal("xcb-{$cname}", "xcb_{$cname}_id", xcb_extension_t);
 
             EOE
     } else {

@@ -3,21 +3,21 @@ use lib <blib/lib lib>;
 
 use Test;
 
-plan 4;
+plan 9;
 
 use NativeCall;
 use X11;
 use X::Protocol::X11;
 use X11::XCB::XProto;
+use nqp;
 
 my $c = Connection.new;
+my $wid = Resource.new(:from($c));
 
 my Channel $w .= new;
 $c.watch($w);
 
 is $w.receive, False, "Got False back from first .watch call";
-
-my $wid = Resource.new(:from($c));
 
 my $cw = CreateWindowRequest.new(
    :wid($wid.value),
@@ -71,3 +71,33 @@ $se.send($c);
 await $t;
 $cme.sequence = $res.sequence;
 is-deeply $res, $cme, "Got event sent from another thread";
+
+$c = Nil;
+$cw = Nil;
+$wid = Nil;
+
+$c = Connection.new;
+$wid = Resource.new(:from($c));
+$cw = CreateWindowRequest.new(
+   :wid($wid.value),
+   :depth(24),
+   :parent($c.roots[0].root),
+   :x(100),
+   :y(100),
+   :width(250),
+   :height(250),
+   :border_width(10),
+   :class(1),
+   :visual($c.roots[0].root_visual)
+   :value_list{"16" => 1, "2" => 0x00ffffff, "8" => 0, "2048" => 0x420000, "8192" => 0x20 }
+);
+
+$w .= new;
+$c.watch($w);
+$c = Nil;
+$cw = Nil;
+$wid = Nil;
+
+for 1..10 { sleep 0.1; nqp::force_gc; Rat.new; };
+throws-like { $w.send("foo") }, X::Channel::SendOnClosed, "event channel closed on destruction";
+

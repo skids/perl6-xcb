@@ -76,16 +76,21 @@ our class Connection is export {
         start { CATCH { $_.say }; react {
             whenever $scrap {
                 @scrapheap.push: $_;
-                LAST { @scrapheap = () }
-                QUIT { @scrapheap = () }
+                LAST { @scrapheap = (); }
+                QUIT { @scrapheap = (); }
             }
             whenever $ask {
                 my $r = +@scrapheap ?? @scrapheap.shift !! xcb_generate_id($c);
                 $res.send($r);
-                LAST { $res.close }
-                QUIT { $res.fail }
-            }	    
-        }}
+                LAST { $res.close; }
+                QUIT { $res.fail; }
+            }
+        }};
+
+        # XXX Activate both whenevers to build their phaser scopes.  RT#129761.
+        $ask.send(1);
+        $scrap.send($res.receive);
+
         $res;
     }
     has $.res_scrap = Channel.new;
@@ -119,15 +124,15 @@ our class Connection is export {
             # XXX race
             $cookies.close;
 	    $r.fail($msg) if $r;
-            while $watcher.poll -> $v {
+            while $watch.poll -> $v {
                 $v.break(Failure.new($msg))
                     if $v ~~ Vow; # XXX
                 $v.fail($msg) if $v ~~ Channel;
             };
             # XXX race
-            $watcher.close;
-            if $watch.defined {
-                $watch.fail($msg);
+            $watch.close;
+            if $watcher.defined {
+                $watcher.fail($msg);
             }
             $destroying.close;
             xcb_disconnect($xcb);
@@ -359,9 +364,9 @@ our class Connection is export {
                         $!event_bases, $!event_bases_lock);
 
     method DESTROY {
-        $.res_ask.close;
-        $.res_scrap.close;
-        $.destroying.send(True);
+        $!res_ask.close;
+        $!res_scrap.close;
+        $!destroying.send(True);
     }
 
     multi method new (Int $fd!, X11::AuthInfo :$Auth) {

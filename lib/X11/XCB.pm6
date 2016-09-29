@@ -582,9 +582,13 @@ our role Reply [$opcode] is export(:internal) {
 our role Request [$opcode, $ext, $isvoid] is export(:internal) {
 
     method xcb_protocol_request_t (|c) {
-
-# XXX        xcb_protocol_request_t.new(:count(1), :$ext, :$opcode, :$isvoid, |c)
-        xcb_protocol_request_t.new(:count(1), :$opcode, :$isvoid, |c)
+        if $ext.defined {
+#XXX            xcb_protocol_request_t.new(:count(1), :$ext, :$opcode, :$isvoid, |c)
+            xcb_protocol_request_t.new(:count(1), nativecast(size_t,:$ext), :$opcode, :$isvoid, |c)
+        }
+        else {
+            xcb_protocol_request_t.new(:count(1), :$opcode, :$isvoid, |c)
+        }
     }
 
     method cstruct {...}
