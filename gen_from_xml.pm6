@@ -127,8 +127,40 @@ sub MakeMod ($xml) {
     if $extension {
         $prologue ~= qq:to<EOE>;
 
-            our \$xcb_{$cname}_id is export(:internal) :=
-                cglobal("xcb-{$cname}", "xcb_{$cname}_id", xcb_extension_t);
+            # Should work, does not on multiple levels, and getting
+            # rid of it lets us not be arsed with the corresponding .so
+            # our constant \$xcb_{$cname}_id is export(:internal) :=
+            #    cglobal("xcb-{$cname}", "xcb_{$cname}_id", xcb_extension_t);
+
+            # We need a "constant" container that can be passed at
+            # compile time through role parameters, but then initialized at
+            # runtime.  All attempts to send a container and initialize
+            # it later have failed.  So we use a sub.
+            my \$xcb_{$cname}_id_cache;
+
+            # Keep a nativecasted alias resident because this may(?) keep
+            # storage from moving around inside the GC.
+            my \$xcb_{$cname}_id_anchor;
+            my \$xcb_{$cname}_id_name_anchor;
+
+            our sub xcb_{$cname}_id \{
+                with \$xcb_{$cname}_id_cache \{
+                    \$xcb_{$cname}_id_cache;
+                }
+                else \{
+                    # For some awful reason (?) we need to cram
+                    # the extension name in with a crowbar.
+                    \$xcb_{$cname}_id_name_anchor = "$xextension".encode("utf8");
+                    \$xcb_{$cname}_id_cache =
+                        xcb_extension_t.new(
+                            :name(nativecast(Pointer,
+                                             \$xcb_{$cname}_id_name_anchor
+                                            ).Int), :num(0));
+                    \$xcb_{$cname}_id_anchor =
+                        nativecast(CArray[uint8], \$xcb_{$cname}_id_cache);
+                    \$xcb_{$cname}_id_cache;
+                }
+            }
 
             EOE
     } else {
@@ -1751,15 +1783,35 @@ sub MakeRequests($mod) {
             }
         }
 
-        $p<pad0_0>.c_attr = 'has uint8 $.pad0_0;' unless $p.params[0]:exists;
-        $p.params.splice(1,0,
-             param.new(:name<length>,:c_attr(
-                       'has uint16 $.length is rw;' ~ "\n" ~
-                       'constant length___maxof = 0xffff;' ~ "\n")));
+        if $mod.extension {
+            $p.params.unshift(
+                 param.new(:name<length>,:c_attr(
+                           'has uint16 $.length is rw;' ~ "\n" ~
+                           'constant length___maxof = 0xffff;' ~ "\n"))
+            );
+        }
+        else {
+            $p<pad0_0>.c_attr = 'has uint8 $.pad0_0;'
+                unless $p.params[0]:exists;
+            $p.params.splice(1,0,
+                 param.new(:name<length>,:c_attr(
+                           'has uint16 $.length is rw;' ~ "\n" ~
+                           'constant length___maxof = 0xffff;' ~ "\n"))
+                 );
+        }
+        my $oc = $req.attribs<opcode>;
+        if $mod.extension {
+            $p.params.unshift(
+                param.new(:name<minor_opcode>
+                          :p2c_init("\$!minor_opcode = $oc;")
+                          :c_attr('has uint8 $.minor_opcode is rw;'))
+                );
+            $oc = 0;
+        }
         $p.params.unshift(
-             param.new(:name<major_opcode>
-                       :p2c_init("\$!major_opcode = {$req.attribs<opcode>};")
-                       :c_attr('has uint8 $.major_opcode is rw;'))
+            param.new(:name<major_opcode>
+                      :p2c_init("\$!major_opcode = $oc;")
+                      :c_attr('has uint8 $.major_opcode is rw;'))
         );
 
         @cstructs.push(qq:to<EOCS>);
@@ -1800,7 +1852,7 @@ sub MakeRequests($mod) {
                 does Request[{$oname}OpcodeEnum::{$oname}Opcode({$req.attribs<opcode>}),
                              {$mod.cname eq "xproto"
                                   ?? "xcb_extension_t"
-                                  !! '$xcb_' ~ $mod.cname ~ "_id"},
+                                  !! '&xcb_' ~ $mod.cname ~ "_id"},
                              {$isvoid.gist}]
                 is export(:DEFAULT, :replies) \{
 

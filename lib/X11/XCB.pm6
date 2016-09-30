@@ -44,7 +44,7 @@ sub xcb_select_r(uint32 $fd, Int $us) is export {
 }
 
 # Likewise, until the ecosystem provides this roll our own.
-class xcb_iovec is repr("CStruct") is export(:internal) {
+our class xcb_iovec is repr("CStruct") is export(:internal) {
     has size_t  $.iov_base is rw; # XXX should be Pointer not size_t
                                   # (but "is rw" and Pointer NYI)
                                   # (so no running this on AS/200)
@@ -76,7 +76,15 @@ class xcb_connection_t is repr('CPointer') is export {
         xcb_disconnect(self);
     }
 }
-class xcb_extension_t is repr('CPointer') is export(:internal :DEFAULT) { }
+
+# We bypass he global synbols so we don't need the .so files
+# (and they were proving impossible to get working anyway)
+# class xcb_extension_t is repr('CPointer') is export(:internal :DEFAULT) { }
+class xcb_extension_t is repr('CStruct') is export(:internal :DEFAULT) {
+    has size_t $.name is rw; # Why str/Str does not work for us here is WAT
+    has uint32 $.num is rw;
+}
+
 class xcb_auth_info_t is repr('CStruct') is export {
 
     #| number of bytes of $!name when utf8-encoded, auto-adjusted
@@ -583,11 +591,10 @@ our role Request [$opcode, $ext, $isvoid] is export(:internal) {
 
     method xcb_protocol_request_t (|c) {
         if $ext.defined {
-#XXX            xcb_protocol_request_t.new(:count(1), :$ext, :$opcode, :$isvoid, |c)
-            xcb_protocol_request_t.new(:count(1), nativecast(size_t,:$ext), :$opcode, :$isvoid, |c)
+            xcb_protocol_request_t.new(:count(1), :ext(nativecast(Pointer,$ext()).Int), :$opcode, :$isvoid, |c);
         }
         else {
-            xcb_protocol_request_t.new(:count(1), :$opcode, :$isvoid, |c)
+            xcb_protocol_request_t.new(:count(1), :$opcode, :$isvoid, |c);
         }
     }
 
@@ -631,8 +638,9 @@ our role Request [$opcode, $ext, $isvoid] is export(:internal) {
             $ca = Pointer.new($ca + nativesizeof(xcb_iovec));
         }
 
-        xcb_send_request($c, 0, nativecast(xcb_iovec, $vecs),
-                         self.xcb_protocol_request_t(:count(+@bufs)));
+        my $rq = self.xcb_protocol_request_t(:count(+@bufs));
+
+        xcb_send_request($c, 0, nativecast(xcb_iovec, $vecs), $rq);
     }
 
     # This might be better in a different role in X11.pm6 as it
