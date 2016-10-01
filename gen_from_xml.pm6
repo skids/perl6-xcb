@@ -150,7 +150,7 @@ sub MakeMod ($xml) {
                 else \{
                     # For some awful reason (?) we need to cram
                     # the extension name in with a crowbar.
-                    \$xcb_{$cname}_id_name_anchor = "$xextension".encode("utf8");
+                    \$xcb_{$cname}_id_name_anchor = "$xextension\\x00".encode("utf8");
                     \$xcb_{$cname}_id_cache =
                         xcb_extension_t.new(
                             :name(nativecast(Pointer,
@@ -161,6 +161,8 @@ sub MakeMod ($xml) {
                     \$xcb_{$cname}_id_cache;
                 }
             }
+
+            our sub extension_t \{ xcb_{$cname}_id() }
 
             EOE
     } else {
@@ -531,6 +533,11 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                         :{$name}({$pptype}.new(nativecast(Pointer[uint8],\$\!$name),
                                    :left(nativesizeof({$pptype}::cstruct)), :!free))
                         EOPA
+                    $p{$name}.p2c_init = qq:to<EOPI>;
+                        \$\!$name = {$pptype}::cstruct.nativeize(\$p6.$name);
+                        EOPI
+                    $p{$name}.p2c_init.note;
+
                 }
             }
             else {

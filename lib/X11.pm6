@@ -28,10 +28,14 @@ our class Connection is export {
     has Channel $.cookies = Channel.new();
     has Channel $.destroying = Channel.new();
     has Channel $!watch = Channel.new();
+
+    # For now we store this per-connection.  How to tie all this
+    # mess together threadsafely and safe to various monkeying TBD.
+    has $.extmap;
     #| Extension base value followed by Error code to type maps from
     #| said extension, pre-sorted by descending base value.
-    has $.error_bases is rw = [ 0, $X11::XCB::XProto::errorcodes ];
-    has $.event_bases is rw = [ 0, $X11::XCB::XProto::eventcodes ];
+    has $.error_bases is rw;
+    has $.event_bases is rw;
     #| Lock for preventing simultaneous access to error/event bases
     has Lock $.error_bases_lock = Lock.new();
     has Lock $.event_bases_lock = Lock.new();
@@ -138,19 +142,39 @@ our class Connection is export {
             xcb_disconnect($xcb);
         }
 
-        my sub error_to_exception($err) {
+        my sub error_to_exception($err, $req) {
             return Nil unless $err.defined;
             my $left = Inf;
-            #TODO extension subclasses
             my $res = RequestError.subclass(nativecast(Pointer,$err),
                                             :$error_bases, :$error_bases_lock,
                                             :$left, :free);
+
+            my class stub is repr('CStruct') {
+                has uint8 $.response_type is rw;
+                has uint8 $.error_code is rw;
+                has uint16 $.sequence is rw;
+                has uint32 $.bad_value;
+            }
+
+            my $major_opcode = $res.?major_opcode // "TODO";
+            my $minor_opcode = $res.?minor_opcode // $req.?opcode // "TODO";
+            my $bad_value = $res.?bad_value;
+
+            if not $bad_value.defined and (nativesizeof($res.cstruct) >= 8) {
+                $bad_value = nativecast(stub, $err).bad_value
+            };
+            $bad_value //= "TODO";
+
             use X::Protocol::X11;
-            X::Protocol::X11.new(:status($res.error_code),
+
+            X::Protocol::X11.new(:status($res.error_code || 1), # TODO, need X::Protocol subclasses
                                  :sequence($res.sequence),
-                                 :major_opcode($res.major_opcode),
-                                 :minor_opcode($res.minor_opcode),
-                                 :bad_value($res.bad_value));
+                                 :$major_opcode,
+                                 :$minor_opcode,
+                                 :$bad_value
+                                 # Need to add this to X::Protocol::X11
+                                 #,:$origin($res);
+                                 );
         }
 
         start { CATCH { $_.say };
@@ -273,8 +297,10 @@ our class Connection is export {
                         if ($sent.defined) {
                             my $c = $responses;
                             my $e2 = $e;
+                            my $p = $_;
                             $sent.then({
-                                my $ev = error_to_exception($e2);
+                                my $ev = error_to_exception($e2,
+                                                     $p.promise.reply_type);
                                 $c.fail($ev === Any ?? $e2 !! $ev)
                             });
                         }
@@ -282,7 +308,8 @@ our class Connection is export {
                             my $p = $_;
                             my $e2 = $e;
                             start {
-                                my $ev = error_to_exception($e2);
+                                my $ev = error_to_exception($e2,
+                                                     $p.promise.reply_type);
                                 $p.break($ev === Any ?? $e2 !! $ev)
                             }
                         }
@@ -293,8 +320,10 @@ our class Connection is export {
                         if ($sent.defined) {
                             my $ev = %errors{.promise.sequence +& 0xffff}:delete;
                             my $c = $responses;
+                            my $p = $_;
                             $sent.then({
-                                $ev = error_to_exception($ev);
+                                $ev = error_to_exception($ev, 
+                                                     $p.promise.reply_type);
                                 $ev === Any ?? $c.close !! $c.fail($ev);
                             })
                         }
@@ -302,7 +331,8 @@ our class Connection is export {
                             my $ev = %errors{.promise.sequence +& 0xffff}:delete;
                             my $p = $_;
                             start {
-                                $ev = error_to_exception($ev);
+                                $ev = error_to_exception($ev,
+                                                     $p.promise.reply_type);
                                 $p.break($ev === Any ?? "No Response" !! $ev);
                             }
                         };
@@ -369,14 +399,52 @@ our class Connection is export {
         $!destroying.send(True);
     }
 
+    my sub ext_init($xcb) {
+        my $extmap = Hash[Any,Any].new(
+            ::X11::XCB::.keys.map({
+                my $name = $_;
+                with ::("X11::XCB::$_\::\&extension_t") {
+                    |($_(), $name)
+                } 
+            })
+        );
+        my @errorcodes;
+        my @eventcodes;
+        for $extmap.kv -> $extt, $modname {
+            my $reply = xcb_get_extension_data($xcb, $extt);
+            if $reply.present {
+                @errorcodes.push(
+                    Pair.new($reply.first_error +& 0xff,
+                             ::("X11::XCB::$modname\::\$errorcodes")))
+                    if $reply.first_error;
+                @eventcodes.push(
+                    Pair.new($reply.first_event +& 0xff,
+                             ::("X11::XCB::$modname\::\$eventcodes")))
+                    if $reply.first_event;
+            }
+        }
+        @errorcodes.push(Pair.new(0, $X11::XCB::XProto::errorcodes));
+        @eventcodes.push(Pair.new(0, $X11::XCB::XProto::eventcodes));
+
+        @errorcodes .= sort: *.key;
+        @eventcodes .= sort: *.key;
+
+        $extmap,
+        [@errorcodes.reverse.map({|($_.key,$_.value)})],
+        [@eventcodes.reverse.map({|($_.key,$_.value)})];
+    }
+
     multi method new (Int $fd!, X11::AuthInfo :$Auth) {
         my $xcb = xcb_connect_to_fd($fd, $Auth);
         if xcb_connection_has_error($xcb) -> $status {
             xcb_disconnect($xcb);
             fail X::Protocol::XCB.new(:$status);
         }
-
-        self.bless(:$xcb);
+        my $extmap;
+        my $error_bases;
+        my $event_bases;
+	($extmap, $error_bases, $event_bases) = ext_init($xcb);
+        self.bless(:$xcb, :$extmap, :$error_bases, :$event_bases);
     }
     multi method new (IO $io!, X11::AuthInfo :$Auth) {
         fail "Getting the fd from {$io.perl} NYI"
@@ -391,7 +459,11 @@ our class Connection is export {
             xcb_disconnect($xcb);
             fail X::Protocol::XCB.new(:$status);
         }
-        self.bless(:$xcb, :$screen);
+        my $extmap;
+        my $error_bases;
+        my $event_bases;
+	($extmap, $error_bases, $event_bases) = ext_init($xcb);
+        self.bless(:$xcb, :$extmap, :$error_bases, :$event_bases);
     }
     multi method new (Str $Display, X11::AuthInfo :$Auth!) {
         my uint32 $screen;
@@ -401,7 +473,11 @@ our class Connection is export {
             xcb_disconnect($xcb);
             fail X::Protocol::XCB.new(:$status);
         }
-        self.bless(:$xcb, :$screen);
+        my $extmap;
+        my $error_bases;
+        my $event_bases;
+	($extmap, $error_bases, $event_bases) = ext_init($xcb);
+        self.bless(:$xcb, :$extmap, :$error_bases, :$event_bases);
     }
     multi method new (*%extra) {
         self.new(Str, |%extra);

@@ -63,7 +63,16 @@ our sub xcb_free (Pointer $mem)
 class xcb_setup_t is repr('CPointer') is export { }
 class xcb_generic_event_t is repr('CPointer') is export { }
 class xcb_generic_error_t is repr('CPointer') is export { }
-class xcb_query_extension_reply_t is repr('CPointer') is export { }
+class xcb_query_extension_reply_t is repr('CStruct') is export {
+    has uint8 $.response_type is rw;
+    has uint8 $.pad0_0;
+    has uint16 $.sequence is rw;
+    has uint32 $.length is rw;
+    has uint8 $.present is rw;
+    has uint8 $.major_opcode is rw;
+    has uint8 $.first_event is rw;
+    has uint8 $.first_error is rw;
+}
 
 # Now the actual XCB core.
 
@@ -349,8 +358,8 @@ our role Error[$error_code] is export(:internal) {
                     last;
                 }
             }
-        }
-        die "TODO/FIXME: unknown error code or extensions NYI"
+        };
+        die "Unknown error code, or extension IDs somehow failed to cache"
             if $cl === Any;
         $cl.new($p, :$left, :$free);
     }
@@ -439,8 +448,8 @@ our role Event[$event_code] is export(:internal) {
                     last;
                 }
             }
-        }
-        die "TODO/FIXME: unknown event code or extensions NYI"
+        };
+        die "Unknown event code, or extension IDs somehow failed to cache"
             if $cl === Any;
         $cl.new($p, :$left, :$free);
     }
