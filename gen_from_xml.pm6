@@ -536,8 +536,6 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                     $p{$name}.p2c_init = qq:to<EOPI>;
                         \$\!$name = {$pptype}::cstruct.nativeize(\$p6.$name);
                         EOPI
-                    $p{$name}.p2c_init.note;
-
                 }
             }
             else {
@@ -1861,7 +1859,7 @@ sub MakeRequests($mod) {
                                   ?? "xcb_extension_t"
                                   !! '&xcb_' ~ $mod.cname ~ "_id"},
                              {$isvoid.gist}]
-                is export(:DEFAULT, :replies) \{
+                is export(:DEFAULT, :requests) \{
 
                 my \$.reply{ $isvoid ?? ";" !! " = " ~ $clname ~ "Reply" ~ ";" }
 
