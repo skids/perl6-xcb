@@ -652,13 +652,32 @@ our role Request [$opcode, $ext, $isvoid] is export(:internal) {
         xcb_send_request($c, 0, nativecast(xcb_iovec, $vecs), $rq);
     }
 
-    # This might be better in a different role in X11.pm6 as it
-    # uses X11::Connection.  We'll untangle the dependency mess later.
-    method send($c) {
-        $.sequence = self.xcb_send_request($c.xcb, self.bufs);
+    #| Send this request to a connection.  If an xcb_connection_t
+    #| is provided, a sequence number is returned.  If an
+    #| X11::Connection is provided, returns an X11::Cookie.
+    #|
+    #| This method will automatically figure out extension opcodes
+    #| and packet lengths at the time the request packet is sent.
+    #| It is safe to send the same request to different connections,
+    #| as they are not modified by this method.
+    # Low-level access.
+    multi method send(xcb_connection_t $xcb) {
+        self.xcb_send_request($xcb, self.bufs);
+    }
+
+    # A higher level Connection object.
+    multi method send($c) {
+        $.sequence = self.send($c.xcb);
 	my $ret = Cookie.new(:$.sequence, :reply_type($.reply));
         $c.cookies.send($ret.vow);
         $ret;
     }
 
+    #| Syncronous version of .send.  Does not return until all
+    #| replies and/or errors to the request have been received.
+    #| Multiple replies will be returned as a Slip.
+    method demand($c) {
+        my @r = await(self.send($c)).list[*];
+        @r.elems == 1 ?? @r[0] !! |@r;
+    }
 }
