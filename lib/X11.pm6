@@ -556,7 +556,7 @@ our class Window is export {
         $c.flush;
         # TODO monitor errors
         if $map {
-            my $mwrq = MapWindowRequest(:window($wid.value));
+            my $mwrq = MapWindowRequest.new(:window($wid.value));
             $mwrq.send($c);
             $c.flush;
         }
