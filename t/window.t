@@ -3,7 +3,7 @@ use lib <blib/lib lib>;
 
 use Test;
 
-plan 16;
+plan 17;
 
 use NativeCall;
 use X11;
@@ -98,13 +98,16 @@ ListExtensionsRequest.new.send($c);
 $c.flush;
 await($voidwait);
 ok $broken, "QueryTree after DestroyWindow gets broken cookie";
+# Test async API and confirm error message
+throws-like { $qt.demand($c) },
+    X::Protocol::X11, message => /:s X11 protocol error\: Bad Window/;
 
+
+# Higher level API
 my $w = Window.new($c, :!map);
 ok $w ~~ Window, "Made a window through high level object";
 $qt = QueryTreeRequest.new(:window($w.wid.value));
-$cookie = $qt.send($c);
-$c.flush;
-$res = await($cookie).receive;
+$res = $qt.demand($c);
 ok $res ~~ QueryTreeReply, "Got another QueryTree reply";
 $w = Nil;
 { use nqp;
