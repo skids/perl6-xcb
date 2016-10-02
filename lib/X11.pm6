@@ -179,8 +179,10 @@ our class Connection is export {
 
         start { CATCH { $_.say };
             my Channel $responses; # channel we are sending responses on
-            my Promise $sent;      # vow from cookie we are working on
+            my Promise $sent;      # thread handling cookie we are working on
+            my Promise $evsent = start { }; # thread that handled last event
             my $kick = 0;          # keepalive counter for void requests
+
             loop {
                 # For now just treat the two channels the same.
                 # Later we may restrict what values we take on each.
@@ -259,12 +261,14 @@ our class Connection is export {
                                 method cstruct { X11::XCB::Event::cstruct };
                             }
 
-                            my $left = Inf;
-                            # TODO thread, serialize, extension event classes
-                            my $res = eventstub.subclass(
-                                nativecast(Pointer,$ev), :$left, :free,
-                                :$event_bases, :$event_bases_lock);
-                            $watcher.send($res)
+                            $evsent .= then({
+                                my $left = Inf;
+                                my $res = eventstub.subclass(
+                                    nativecast(Pointer,$ev), :$left, :free,
+                                    :$event_bases, :$event_bases_lock
+                                );
+                                $watcher.send($res)
+                            });
                         }
                         else {
                             X11::XCB::xcb_free($ev);
