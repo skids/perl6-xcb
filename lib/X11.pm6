@@ -547,10 +547,11 @@ our class Window is export {
                :$visual = $c.roots[0].root_visual) {
         my $wid = Resource.new(:from($c));
         my %value_list = "16" => 1, "2" => 0x00ffffff, "8" => 0, "2048" => 4325376, "8192",0x20;
+        my $parentid = $parent ~~ Window ?? $parent.wid.value !! $parent;
         my $cwrq = CreateWindowRequest.new(
             :wid($wid.value),
             :$depth, :$x, :$y, :$width, :$height, :$border_width,
-            :$class, :$parent, :$visual, :%value_list
+            :$class, :parent($parentid), :$visual, :%value_list
         );
         $cwrq.send($c);
         $c.flush;
@@ -569,6 +570,27 @@ our class Window is export {
            ($qtrp ~~ QueryTreeReply) and $qtrp.parent == $parent;
         }
         self.bless(:$wid);
+    }
+
+    # Generic handling of simple requests with no response
+    method tail-isvoid ($req, :$sync) {
+        if ($sync) {
+            my $fail = $req.demand($.wid.from);
+            return $fail.message ~~ 'No Response' ?? True !! $fail;
+        }
+        else {
+            $req.send($.wid.from);
+        }
+    }
+
+    method Map (:$sync = False) {
+        my $mwrq = MapWindowRequest.new(:window($.wid.value));
+        self.tail-isvoid($mwrq, :$sync);
+    }
+
+    method Unmap (:$sync = False) {
+        my $uwrq = UnmapWindowRequest.new(:window($.wid.value));
+        self.tail-isvoid($uwrq, :$sync);
     }
 
     submethod DESTROY {
