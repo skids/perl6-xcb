@@ -12,6 +12,7 @@ use nqp;
 my $c = Connection.new;
 
 use X11::XCB::XProto;
+import CWEnum :enums;
 
 my $wid = Resource.new(:from($c));
 
@@ -26,7 +27,12 @@ my $cw = CreateWindowRequest.new(
    :border_width(10),
    :class(1),
    :visual($c.roots[0].root_visual)
-   :value_list{"16" => 1, "2" => 0x00ffffff, "8" => 0, "2048" => 4325376, "8192" => 0x20 }
+   :value_list(CWBitGravity,  1,
+               CWBackPixel,   0x00ffffff,
+               CWBorderPixel, 0,
+               CWEventMask,   4325376,
+               CWColormap,    0x20,
+              )
 );
 
 my $voidpromise = $cw.send($c);

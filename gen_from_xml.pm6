@@ -253,10 +253,13 @@ sub MakeEnums ($mod) {
 
         # Perl6 things that can be overidden, but avoid surprises
         # TODOP6: will have to go look for more of these pre-publication
-        if @elements.first(*.attribs<name> eq any <
-             Cursor
-            >) {
-            @res[1] = " is export(:danger)";
+        # TODOP6: better exemption logic here rather than cherry picking
+        if $enum.attribs<name> ne "CW" {
+            if @elements.first(*.attribs<name> eq any <
+                 Cursor
+                >) {
+                @res[1] = " is export(:danger)";
+            }
         }
 
         # conflicts within or between modules
@@ -1103,19 +1106,19 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                 # Perl6 object does not need attribute for $name
                 constant {$name}___maxof =
                     2 ** (nativesizeof({NCtype($type)}) * 8) - 1;
-                has \%.$pname is rw;
+                has Any \%.$pname\{{$renum.value}Enum\::{$renum.value}} is rw;
                 EOPT
             $p{$name}.p2c_code = qq:to<EOPC>;
                 \{
                     my \$b;
                     loop (\$b = 1; \$b < {$name}___maxof; \$b +<= 1) \{
-                        last if \%.$pname\{\$b}:exists;
+                        last if \%.$pname\{{$renum.value}Enum\::{$renum.value}(\$b)}:exists;
                     }
                     if \$b < {$name}___maxof \{
                         @bufs.push: Buf[uint32].new(
                             (loop (\$b = 1; \$b < {$name}___maxof; \$b +<= 1) \{
-                                if \%.$pname\{\$b}:exists \{                            
-                                    (+\%.$pname\{\$b}) +& 0xffffffff;
+                                if \%.$pname\{{$renum.value}Enum\::{$renum.value}(\$b)}:exists \{                            
+                                    (+\%.$pname\{{$renum.value}Enum\::{$renum.value}(\$b)}) +& 0xffffffff;
                                 }
                              }))
                     }
@@ -1126,11 +1129,12 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                 \{
                     my \$b = 1;
                     while \$b < {$name}___maxof \{
-                            \$\!{$name} +|= \$b if \$p6.$pname\{\$b}:exists;
+                            \$\!{$name} +|= \$b if \$p6.$pname\{{$renum.value}Enum\::{$renum.value}(\$b)}:exists;
                             \$b +<= 1;
                     };
                 }
                 EOPI
+            #TODO: C/binary to perl object creation
 
         }
         when "doc" | "reply" {

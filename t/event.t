@@ -19,6 +19,8 @@ $c.watch($w);
 
 is $w.receive, False, "Got False back from first .watch call";
 
+import CWEnum :enums;
+
 my $cw = CreateWindowRequest.new(
    :wid($wid.value),
    :depth(24),
@@ -30,7 +32,12 @@ my $cw = CreateWindowRequest.new(
    :border_width(10),
    :class(1),
    :visual($c.roots[0].root_visual)
-   :value_list{"16" => 1, "2" => 0x00ffffff, "8" => 0, "2048" => 0x420000, "8192" => 0x20 }
+   :value_list(CWBitGravity,  1,
+               CWBackPixel,   0x00ffffff,
+               CWBorderPixel, 0,
+               CWEventMask,   4325376,
+               CWColormap,    0x20,
+              )
 );
 
 $cw.send($c);
@@ -89,7 +96,12 @@ $cw = CreateWindowRequest.new(
    :border_width(10),
    :class(1),
    :visual($c.roots[0].root_visual)
-   :value_list{"16" => 1, "2" => 0x00ffffff, "8" => 0, "2048" => 0x420000, "8192" => 0x20 }
+   :value_list(CWBitGravity,  1,
+               CWBackPixel,   0x00ffffff,
+               CWBorderPixel, 0,
+               CWEventMask,   4325376,
+               CWColormap,    0x20,
+              )
 );
 
 $w .= new;

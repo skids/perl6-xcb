@@ -538,6 +538,7 @@ our class Window is export {
     has Resource $.wid;
 
     import WindowClassEnum :enums;
+    import CWEnum :enums;
 
     method new(Connection $c, :$map = True, :$depth = 24,
                :$x = 100, :$y = 100, :$width = 250, :$height = 250,
@@ -546,7 +547,12 @@ our class Window is export {
                :$parent = $c.roots[0].root,
                :$visual = $c.roots[0].root_visual) {
         my $wid = Resource.new(:from($c));
-        my %value_list = "16" => 1, "2" => 0x00ffffff, "8" => 0, "2048" => 4325376, "8192",0x20;
+
+        my Any %value_list{CW} = CWBitGravity, 1,
+                                 CWBackPixel, 0x00ffffff,
+                                 CWBorderPixel, 0, 
+                                 CWEventMask, 4325376,
+                                 CWColormap, 0x20;
         my $parentid = $parent ~~ Window ?? $parent.wid.value !! $parent;
         my $cwrq = CreateWindowRequest.new(
             :wid($wid.value),
@@ -600,3 +606,27 @@ our class Window is export {
 
 }
 
+our class GC is export {
+    has Resource $.cid;
+    has $.drawable;
+
+    method new(Connection $c, :$drawable!) {
+        my $cid = Resource.new(:from($c));
+        my $drawableid = 
+           $drawable ~~ Window ?? $drawable.wid.value !! $drawable; 
+        my %value_list = "4" => $c.Setup.roots[0].black_pixel,
+                         "8" => $c.Setup.roots[0].white_pixel;
+        my $cgrq = CreateGCRequest.new(
+            :cid($cid.value), :drawable($drawableid), :%value_list
+        );
+        $cgrq.send($c);
+        $c.flush;
+        self.bless(:$cid, :$drawable);
+    }
+
+    submethod DESTROY {
+        my $dgc = FreeGCRequest.new(:gc($!cid.value));
+        $dgc.send($!cid.from);
+    }
+
+}

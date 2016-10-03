@@ -8,6 +8,7 @@ plan 2;
 use NativeCall;
 use X11;
 use X11::XCB::XProto;
+import CWEnum :enums;
 use X11::XCB::XFixes;
 
 use nqp;
@@ -27,7 +28,12 @@ my $cw = CreateWindowRequest.new(
    :border_width(10),
    :class(1),
    :visual($c.roots[0].root_visual)
-   :value_list{"16" => 1, "2" => 0x00ffffff, "8" => 0, "2048" => 4325376, "8192" => 0x20 }
+   :value_list(CWBitGravity,  1,
+               CWBackPixel,   0x00ffffff,
+               CWBorderPixel, 0,
+               CWEventMask,   4325376,
+               CWColormap,    0x20,
+              )
 );
 
 $cw.send($c);
