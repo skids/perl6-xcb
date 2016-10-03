@@ -271,7 +271,7 @@ class X::Protocol::XCB is X::Protocol is export {
     }
 }
 
-class Cookie is Promise {
+class Cookie is Promise is export {
     has uint64 $.sequence;
     has $.reply_type;
 }

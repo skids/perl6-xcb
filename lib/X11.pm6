@@ -510,7 +510,9 @@ our class Font is export {
                           font_descent properties char_infos>;
 
     #| Open the first font matching the string in :first
-    #| (using X11 matching/wildcard rules).
+    #| (using X11 matching/wildcard rules) and query it.
+    #| This is currenty very slow.  If you do not need the information
+    #| derived from a QueryFontReply, use .Open instead.
     method new(Connection $c, :$first!) {
         my $lf = ListFontsRequest.new(:max_names(1), :pattern($first));
         my $fl = await($lf.send($c)).list;
@@ -525,6 +527,45 @@ our class Font is export {
         my $xcbfont = await($p).receive;
         fail("Problem Opening Font") unless $xcbfont ~~ QueryFontReply;
         self.bless(:$fid, :$xcbfont);
+    }
+
+    #| Open the first font matching the string in :first
+    #| (using X11 matching/wildcard rules).  Does not query the
+    #| font, so many informational methods will not work until
+    #| Query is run.
+    method Open(Connection $c, :$first!) {
+        my $lf = ListFontsRequest.new(:max_names(1), :pattern($first));
+        my $fl = await($lf.send($c)).list;
+        fail("No Matching Fonts") unless $fl.elems;
+        my $name = $fl[0].names[0];
+        my $fid = Resource.new(:from($c));
+        my $of = OpenFontRequest.new(:fid($fid.value), :$name);
+        $of.send($c);
+        self.bless(:$fid);
+    }
+
+    #| Get information about a Font from the server.  This currently
+    #| takes a long time.  If called with :!sync (the default), the
+    #| request is sent and a Cookie is returned while the information
+    #| is made into an object in another thread.  That Cookie can then
+    #| later be passed back into this method (as a value to :sync)
+    #| to wait until the font information is populated, if not aready.
+    #|
+    #| Otherwise, if called with a true value for :sync, the Font
+    #| creation will collate all the information before returning.
+    multi method Query(Cookie :$sync) {
+        $!xcbfont = await($sync).receive;
+    }
+    multi method Query(:$sync = False) {
+        my $qf = QueryFontRequest.new(:font($.fid.value));
+        my $p = $qf.send($.fid.from);
+        if ($sync) {
+            $.fid.from.flush;
+            $!xcbfont = await($p).receive;
+        }
+        else {
+            $p;
+        }
     }
 
     submethod DESTROY {
