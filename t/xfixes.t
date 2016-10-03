@@ -37,7 +37,6 @@ my $cookie = $ci.send($c);
 $c.flush;
 
 my $res = await($cookie).receive;
-$res.perl.say;
 ok $res ~~ XFixesQueryVersionReply, "Got a XFixesQueryVersionReply";
 
 $ci = FetchRegionRequest.new(:region(0));
