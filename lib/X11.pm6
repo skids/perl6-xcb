@@ -651,12 +651,14 @@ our class GC is export {
     has Resource $.cid;
     has $.drawable;
 
+    import GCEnum :enums;
+
     method new(Connection $c, :$drawable!) {
         my $cid = Resource.new(:from($c));
         my $drawableid = 
            $drawable ~~ Window ?? $drawable.wid.value !! $drawable; 
-        my %value_list = "4" => $c.Setup.roots[0].black_pixel,
-                         "8" => $c.Setup.roots[0].white_pixel;
+        my Any %value_list{GC} = GCForeground, $c.Setup.roots[0].black_pixel,
+                                 GCBackground, $c.Setup.roots[0].white_pixel;
         my $cgrq = CreateGCRequest.new(
             :cid($cid.value), :drawable($drawableid), :%value_list
         );
