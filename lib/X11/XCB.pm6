@@ -318,7 +318,7 @@ our role Error[$error_code] is export(:internal) {
         my $len = nativesizeof($.cstruct);
         my $res = Buf.new(0 xx $len);
         my $c := nativecast($.cstruct, $res);
-        $c.nativeize(self);
+        $c.nativize(self);
         $res;
     }
     method bufs {
@@ -413,7 +413,7 @@ our role Event[$event_code] is export(:internal) {
         my $len = nativesizeof($.cstruct);
         my $res = Buf.new(0 xx $len);
         my $c := nativecast($.cstruct, $res);
-        $c.nativeize(self);
+        $c.nativize(self);
         $res;
     }
     method bufs {
@@ -508,7 +508,7 @@ our role Struct is export(:internal) {
         my $len = nativesizeof($.cstruct);
         my $res = Buf.new(0 xx $len);
         my $c := nativecast($.cstruct, $res);
-        $c.nativeize(self);
+        $c.nativize(self);
         $res;
     }
     method bufs {
@@ -531,7 +531,7 @@ our role Reply [$opcode] is export(:internal) {
         my $len = nativesizeof($.cstruct);
         my $res = Buf.new(0 xx $len);
         my $c := nativecast($.cstruct, $res);
-        $c.nativeize(self);
+        $c.nativize(self);
         $res;
     }
 
@@ -617,7 +617,7 @@ our role Request [$opcode, $ext, $isvoid] is export(:internal) {
         my $len = nativesizeof($.cstruct);
         my $res = Buf.new(0 xx $len);
         my $c := nativecast($.cstruct, $res);
-        $c.nativeize(self);
+        $c.nativize(self);
         $res;
     }
 

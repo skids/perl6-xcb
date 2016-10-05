@@ -520,7 +520,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                         EOPC
                     $p{$name}.p2c_init = qq:to<EOPI>;
                         \{
-                            my \$c = {$pptype}::cstruct.nativeize(\$p6.$name);
+                            my \$c = {$pptype}::cstruct.nativize(\$p6.$name);
                             nativecast(CArray[uint8],\$\!$name)[
                                 ^nativesizeof({$pptype}::cstruct)] =
                                 nativecast(CArray[uint8],\$c)[
@@ -537,7 +537,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                                    :left(nativesizeof({$pptype}::cstruct)), :!free))
                         EOPA
                     $p{$name}.p2c_init = qq:to<EOPI>;
-                        \$\!$name = {$pptype}::cstruct.nativeize(\$p6.$name);
+                        \$\!$name = {$pptype}::cstruct.nativize(\$p6.$name);
                         EOPI
                 }
             }
@@ -1269,7 +1269,7 @@ sub MakeErrors2($mod) {
             {$p.params».c2p_arg.join(",\n").indent(16)}
                         }
                     }
-                    method nativeize(\$p6) \{
+                    method nativize(\$p6) \{
                         \$\!sequence = \$p6.sequence // 0;
             {$p.params».p2c_init.join("\n").indent(12)}
                     }
@@ -1389,7 +1389,7 @@ sub MakeEvents2($mod) {
         if %ClassMultiplex{$mod.cname ~ ":" ~ $ename} -> $multiplex {
             (my $mxu, my $mxi) = $multiplex.split(":");
             $p{$mxi}.p2c_init = "\$\!$mxi = +\$p6.$mxu;";
-            $p{$mxu}.p2c_init = "\$\!$mxu\.\"set_\{\$p6.^name.split(\"::\")[*-1]}\"(\$p6.$mxu\.cstruct.nativeize(\$p6.$mxu));";
+            $p{$mxu}.p2c_init = "\$\!$mxu\.\"set_\{\$p6.^name.split(\"::\")[*-1]}\"(\$p6.$mxu\.cstruct.nativize(\$p6.$mxu));";
             $p{$mxi}.p_attr = |();
             my $uname = %ClassOcclude{$mod.cname ~ ":" ~ $ename};
             $p{$mxu}.c2p_arg ~~ s/$uname/$uname\(\$\.$mxi\)/;
@@ -1418,7 +1418,7 @@ sub MakeEvents2($mod) {
             {$p.params».c2p_arg.join(",\n").indent(16)}
                         }
                     }
-                    method nativeize(\$p6) \{
+                    method nativize(\$p6) \{
                         \$\!response_type = \$p6.event_code;
                         \$\!sequence = \$p6.sequence // 0;
             {$p.params».p2c_init.join("\n").indent(12)}
@@ -1514,7 +1514,7 @@ sub MakeStructs($mod) {
             {$p.params».c2p_arg.join(",\n").indent(16)}
                         }
                     }
-                    method nativeize(\$p6) \{
+                    method nativize(\$p6) \{
             {$p.params».p2c_init.join("\n").indent(12)}
                     }
                 };
@@ -1712,7 +1712,8 @@ sub MakeReplies($mod) {
                 {$p.params».c2p_arg.join(",\n").indent(16)}
                             }
                         }
-                        method nativeize(\$p6) \{
+                        method nativize(\$p6) \{
+                            \$\!response_type = 1;
                             \$\!sequence = \$p6.sequence // 0;
                 {$p.params».p2c_init.join("\n").indent(12)}
                         }
@@ -1834,7 +1835,7 @@ sub MakeRequests($mod) {
             {$p.params».c2p_arg.join(",\n").indent(16)}
                         }
                     }
-                    method nativeize(\$p6) \{
+                    method nativize(\$p6) \{
             {$p.params».p2c_init.join("\n").indent(12)}
                     }
                 };
@@ -1892,7 +1893,7 @@ sub Output ($mod) {
     $out.print($mod.prologue ~ "\n");
 
     $out.print( qq:to<EOOC> ) if $mod.opcodes;
-        our class { $mod.extension ?? $mod.modname !! "" }OpcodeEnum is export(:opcodes) \{
+        our class { $mod.extension ?? $mod.modname !! "" }OpcodeEnum is export(:DEFAULT, :opcodes) \{
             our enum { $mod.extension ?? $mod.modname !! "" }Opcode is export(:enums) «
         { (":{.value}({.key})\n" for $mod.opcodes.sort(+*.key)).join.indent(8) }
             »;
