@@ -504,6 +504,15 @@ our class Resource is export {
 
 our class Font is export {
     has Resource $.fid;
+    has $.encoding;
+
+    my sub encoding_from_XLFD ($fstr) {
+        my @components = $fstr.split('-');
+        # TODO need to handle aliases or do we always get XLFD here?
+        return Nil unless +@components == 15;
+        return @components[*-2,*-1].join('-');
+    }
+
     has $.xcbfont handles<min_bounds max_bounds min_char_or_byte2
                           max_char_or_byte2 default_char draw_direction
                           min_byte1 max_byte1 all_chars_exist font_ascent
@@ -520,13 +529,14 @@ our class Font is export {
         my $name = $fl[0].names[0];
         my $fid = Resource.new(:from($c));
         my $of = OpenFontRequest.new(:fid($fid.value), :$name);
+        my $encoding = encoding_from_XLFD($name);
         $of.send($c);
         my $qf = QueryFontRequest.new(:font($fid.value));
         my $p = $qf.send($c);
         $c.flush; # Seems to need some encouragement
         my $xcbfont = await($p).receive;
         fail("Problem Opening Font") unless $xcbfont ~~ QueryFontReply;
-        self.bless(:$fid, :$xcbfont);
+        self.bless(:$fid, :$xcbfont, :$encoding);
     }
 
     #| Open the first font matching the string in :first
@@ -540,8 +550,9 @@ our class Font is export {
         my $name = $fl[0].names[0];
         my $fid = Resource.new(:from($c));
         my $of = OpenFontRequest.new(:fid($fid.value), :$name);
+        my $encoding = encoding_from_XLFD($name);
         $of.send($c);
-        self.bless(:$fid);
+        self.bless(:$fid, :$encoding);
     }
 
     #| Get information about a Font from the server.  This currently
