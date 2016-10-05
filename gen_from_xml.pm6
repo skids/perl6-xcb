@@ -228,6 +228,10 @@ sub MakeTypeDefs ($mod) {
 # Deal with enums and unions that are used to multiplex classes
 our %ClassOcclude = "randr:Notify" => "NotifyData";
 our %ClassMultiplex = "randr:Notify" => "u:subCode";
+# TODO
+# XInput: InputClass Feedbackclass DeviceControl DeviceClassType maybe more
+# xkb: EventType DoodadType SAType Behavior(undo current first cut) and maybe more
+# ...and retool event enums everywhere to act similarly
 
 our %EnumRemap;
 sub MakeEnums ($mod) {
