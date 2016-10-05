@@ -222,7 +222,7 @@ given QueryKeymapReply.new(:keys[^32]) {
 
   my @bufs = (|$_ for .bufs);
 
-  is @bufs, @(uint32_bytes(0),uint32_bytes(2),|^32), "$what bufferizes correctly";
+  is @bufs, @(1,0,uint16_bytes(0),uint32_bytes(2),|^32), "$what bufferizes correctly";
 
   my $b = Buf.new(@bufs);
   my $c = nativecast(.cstruct,$b);
@@ -234,7 +234,7 @@ given QueryKeymapReply.new(:keys[^32]) {
       :19keys___pad19, :20keys___pad20, :21keys___pad21, :22keys___pad22,
       :23keys___pad23, :24keys___pad24, :25keys___pad25, :26keys___pad26, 
       :27keys___pad27, :28keys___pad28, :29keys___pad29, :30keys___pad30, 
-      :31keys___pad31, :2length, :0sequence), "$what roundtrip to cstruct";
+      :31keys___pad31, :2length, :0sequence, :1response_type), "$what roundtrip to cstruct";
   my $left = 40;
   my $s = QueryKeymapReply.new(nativecast(Pointer,$c), :$left, :!free);
   is $left, 0, "$what unpacking subtracts its length correctly";
@@ -311,7 +311,7 @@ given GetPropertyReply.new(:format(8), :sequence(0x1234),:type(1),:bytes_after(2
   my $what = "8-bit GetPropertyReply";
   ok $_.defined, "$what create perl instance";
   my @bufs = (|$_ for .bufs);
-  is @bufs, @(0, 8, |uint16_bytes(0x1234), |(uint32_bytes($_) for (4,1,2)),|uint32_bytes(16),0 xx 12,|(1..16)), "$what bufferizes correctly";
+  is @bufs, @(1, 8, |uint16_bytes(0x1234), |(uint32_bytes($_) for (4,1,2)),|uint32_bytes(16),0 xx 12,|(1..16)), "$what bufferizes correctly";
 
   my $b = Buf.new(@bufs);
   my $c = nativecast(.cstruct,$b);
@@ -320,7 +320,7 @@ given GetPropertyReply.new(:format(8), :sequence(0x1234),:type(1),:bytes_after(2
     :4660sequence, :8format, :2bytes_after, :1type, :16value_len,
     :0pad0_0, :0pad0_1, :0pad0_2, :0pad0_3, :0pad0_4, :0pad0_5,
     :0pad0_6, :0pad0_7, :0pad0_8, :0pad0_9, :0pad0_10, :0pad0_11,
-    :length(Int(16 / 4))
+    :length(Int(16 / 4)), :1response_type
     ), "$what roundtrip to cstruct";
   my $left = 48;
   my $s = GetPropertyReply.new(nativecast(Pointer,$c), :$left, :!free);
@@ -333,7 +333,7 @@ given GetPropertyReply.new(:format(16), :type(1),:bytes_after(2), :value(array[u
   ok $_.defined, "$what create perl instance";
   my @bufs = (|$_ for .bufs);
 
-  is @bufs, @(0, 16, |uint16_bytes(0), |(uint32_bytes($_) for (8,1,2)),|uint32_bytes(16),0 xx 12,|(501..516)), "$what bufferizes correctly";
+  is @bufs, @(1, 16, |uint16_bytes(0), |(uint32_bytes($_) for (8,1,2)),|uint32_bytes(16),0 xx 12,|(501..516)), "$what bufferizes correctly";
 
   my $b = Buf.new(.bufs[0].values,|(uint16_bytes($_) for 501..516));
   my $c = nativecast(.cstruct,$b);
@@ -342,7 +342,7 @@ given GetPropertyReply.new(:format(16), :type(1),:bytes_after(2), :value(array[u
     :16format, :2bytes_after, :1type, :16value_len,
     :0pad0_0, :0pad0_1, :0pad0_2, :0pad0_3, :0pad0_4, :0pad0_5,
     :0pad0_6, :0pad0_7, :0pad0_8, :0pad0_9, :0pad0_10, :0pad0_11,
-    :length(Int(2 * 16 / 4))
+    :length(Int(2 * 16 / 4)), :1response_type
     ), "$what roundtrip to cstruct";
   my $left = 64;
   my $s = GetPropertyReply.new(nativecast(Pointer,$c), :$left, :!free);
@@ -355,7 +355,7 @@ given GetPropertyReply.new(:format(32), :type(1),:bytes_after(2), :value(array[u
   ok $_.defined, "$what create perl instance";
   my @bufs = (|$_ for .bufs);
 
-  is @bufs, @(0, 32, |uint16_bytes(0), |(uint32_bytes($_) for (16,1,2)),|uint32_bytes(16),0 xx 12,|(66001..66016)), "$what bufferizes correctly";
+  is @bufs, @(1, 32, |uint16_bytes(0), |(uint32_bytes($_) for (16,1,2)),|uint32_bytes(16),0 xx 12,|(66001..66016)), "$what bufferizes correctly";
 
   my $b = Buf.new(.bufs[0].values,|(uint32_bytes($_) for 66001..66016));
   my $c = nativecast(.cstruct,$b);
@@ -364,7 +364,7 @@ given GetPropertyReply.new(:format(32), :type(1),:bytes_after(2), :value(array[u
     :32format, :2bytes_after, :1type, :16value_len,
     :0pad0_0, :0pad0_1, :0pad0_2, :0pad0_3, :0pad0_4, :0pad0_5,
     :0pad0_6, :0pad0_7, :0pad0_8, :0pad0_9, :0pad0_10, :0pad0_11,
-    :length(Int(4 * 16 / 4))
+    :length(Int(4 * 16 / 4)), :1response_type
     ), "$what roundtrip to cstruct";
   my $left = 96;
   my $s = GetPropertyReply.new(nativecast(Pointer,$c), :$left, :!free);
