@@ -24,7 +24,7 @@ my $font = Font.new($c, :first<*-fixed-*-iso8859-1>);
 ok ($font ~~ Font and $font.defined), "Got a font through top level api.";
 ok $font.xcbfont ~~ QueryFontReply:D, "xcb font object populated";
 ok $font.draw_direction ~~ Int:D, "xcb font handles a method for Font";
-is $font.encoding, "iso8859-1", "Found and recognized an iso8859-1 font.";
+is $font.encoding, "iso-8859-1", "Found and recognized an iso8859-1 font.";
 
 my $lf = ListFontsRequest.new(:max_names(100), :pattern<*-hoopiedoop-*>);
 my $fl = await($lf.send($c)).list[0];

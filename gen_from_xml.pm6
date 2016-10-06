@@ -244,6 +244,8 @@ sub MakeEnums ($mod) {
             or $mod.cname eq "glx"     and $enum eq any <GC>
             or $enum eq any <Control Cursor>;
 
+        return "GCField" if $mod.cname eq "xproto" and $enum eq any <GC>;
+
         return "ScreenSaverState"
             if $enum eq "ScreenSaver";
 
@@ -296,6 +298,7 @@ sub MakeEnums ($mod) {
             $mod.cname eq "randr";
 
         return "CW$item"      if $from eq any <CW ConfigWindow>;
+        return "GC$item"      if $from eq any <GCField>;
 
         return "$from$item"
             if $mod.cname eq "xkb" and $from eq any <Groups>
@@ -674,7 +677,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                     $p{$TODOP6}.c_attr = "# $TODOP6 complicated $_ ($eq) of {$f.attribs<type>}";
                     $p{$TODOP6}.p_attr = "# $TODOP6 complicated $_ ($eq) of {$f.attribs<type>}";
                 }
-                elsif $f.attribs<type> eq any <char STRING8> {
+                elsif $type eq any <char STRING8> {
                     if $eq ~~ /pstruct\.<!before length<!alpha>>/ {
                         $TODOP6++;
                         $p{$name}.c_attr = "# Dynamic layout: {$type}s $TODOP6 fields other than .length";
@@ -877,7 +880,11 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
             elsif $f.elements(:TAG<fieldref>) -> [ $fr ] {
                 $found_list++;
                 my $frname = $fr.contents.Str;
-                if $f.attribs<type> eq any <char STRING8> {
+                if $f.attribs<type> eq "STRING8" or
+                    $f.attribs<type> eq "char"
+                    # this is tacky -- for ImageText8
+                    and !($f.attribs<name> eq "string" and $p<x>:exists) {
+
                     my $name = $f.attribs<name>;
                     my $type = $f.attribs<type>;
 
@@ -941,6 +948,76 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                                 (Buf.new(nativecast(CArray[uint8], Pointer.new(\$p + \$oleft - \$left))[
                                     ^\$pstruct\.$frname
                                 ]).decode("utf8"));
+                            \$left -= \$pstruct\.$frname;
+                            EOP2
+                }
+               elsif $f.attribs<type> eq "CHAR2B" or $f.attribs<type> eq "char" and $f.attribs<name> eq "string" and $p<x>:exists {
+                    # Font stuff.  Use a buffer not a string due to encoding
+                    my $name = $f.attribs<name>;
+                    my $type = $f.attribs<type>;
+
+                    # Go back and remove the _len field from perl6 attributes
+                    $p{$frname}.p_attr = "# $frname not needed in P6 object";
+
+                    my $sz = $type eq "CHAR2B" ?? 2 !! 1;
+
+                    $p{$frname}.p2c_init = qq:to<EOPC>;
+                        die ("Oddly short buffer") if \$p6.{$name}.bytes % $sz;
+                        my \${$frname}___sizeof = \$p6.{$name}.bytes div $sz;
+                        die ("Maximum field size exceeded")
+                            if \${$frname}___sizeof > {$frname}___maxof;
+                        EOPC
+
+                    my $c2p_len = $p{$frname}.c2p_code;
+                    if $c2p_len ~~ s/^.*?\"$frname\"\s*\,// {
+                        $p{$frname}.c2p_code = qq:to<EOC1>;
+                            # No p6 attribute $frname to init but may need value in place
+                            my \${$frname}___inplace = $c2p_len * $sz;
+                            EOC1
+                    }
+                    else {
+                        $c2p_len = "";
+                        $p{$frname}.c2p_code = "# No p6 attribute $frname to init";
+                    }
+                    if $p{$frname}.c_attr ~~ /^\#/ {
+                       my $lc = "self.{$name}.bytes";
+                       if $p{$frname}.p2c_code ~~
+                           /\$\.$frname <!before <alpha>|\d>/ {
+                           $p{$frname}.p2c_code ~~
+                               s:g/\$\.$frname <!before <alpha>|\d>/$lc/;
+                       }
+                    }
+                    else {
+                        $p{$frname}.p2c_init ~=
+                            "\n\$\!$frname = \${$frname}___sizeof;"
+                    }
+
+                    $p{$frname}.c2p_arg = |();
+                    $p{$name}.c_attr = "# Dynamic layout: chars";
+                    $p{$name}.p_attr = "has \$.$name is rw;";
+                    $p{$name}.p2c_code = qq:to<EOCC>;
+                        given \$\.{$name} \{
+                            if .elems \{ \@bufs.push(\$_) }
+                        }
+                        EOCC
+
+                    $p{$name}.c2p_code = $c2p_len ?? qq:to<EOP1> !! qq:to<EOP2>;
+                            die("Short packet")
+                                unless \$left >= \${$frname}___inplace;
+                            @args.append:
+                                "$name",
+                                (Buf.new(nativecast(CArray[uint8], Pointer.new(\$p + \$oleft - \$left))[
+                                    ^\${$frname}___inplace
+                                ]));
+                            \$left -= \${$frname}___inplace;
+                            EOP1
+                            die("Short packet")
+                                unless \$left >= \$pstruct\.$frname;
+                            @args.append:
+                                "$name",
+                                (Buf.new(nativecast(CArray[uint8], Pointer.new(\$p + \$oleft - \$left))[
+                                    ^\$pstruct\.$frname
+                                ]));
                             \$left -= \$pstruct\.$frname;
                             EOP2
                 }
