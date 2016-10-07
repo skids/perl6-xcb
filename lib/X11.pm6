@@ -601,7 +601,26 @@ our class Window is export {
                :$border_width = 10,
                :$class = InputOutput,
                :$parent = $c.roots[0].root,
-               :$visual = $c.roots[0].root_visual) {
+               :$visual = $c.roots[0].root_visual,
+               *%ValueList (
+                   :$BackPixmap,
+                   :$BackPixel,
+                   :$BorderPixmap,
+                   :$CWBorderPixel,
+                   :$BitGravity,
+                   :$WinGravity,
+                   :$BackingStore,
+                   :$BackingPlanes,
+                   :$BackingPixel,
+                   :$OverrideRedirect,
+                   :$SaveUnder,
+                   :$EventMask,
+                   :$DontPropagate,
+                   :$Colormap,
+                   :$Cursor,
+                   *%ignored
+               ),
+        ) {
         my $wid = Resource.new(:from($c));
 
         my Any %value_list{CW} = CWBitGravity, 1,
@@ -609,6 +628,17 @@ our class Window is export {
                                  CWBorderPixel, 0, 
                                  CWEventMask, 4325376,
                                  CWColormap, 0x20;
+
+        if +%ValueList{CW.enums.keys} {
+            %value_list = |%value_list, |(%ValueList.kv.map:
+                -> $k, $v {
+                    if CW.enums{"CW$k"}:exists {
+                        |(CW(CW.enums{"CW$k"}), $v)
+                    }
+                }
+            )
+        }
+
         my $parentid = $parent ~~ Window ?? $parent.wid.value !! $parent;
         my $cwrq = CreateWindowRequest.new(
             :wid($wid.value),
