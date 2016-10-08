@@ -592,6 +592,7 @@ our class Font is export {
 
 our class Window is export {
     has Resource $.wid;
+    method xcb { $.wid.value };
 
     import WindowClassEnum :enums;
     import CWEnum :enums;
@@ -698,13 +699,52 @@ our class GC is export {
 
     import GCFieldEnum :enums;
 
-    method new(Connection $c, :$drawable!) {
+    method new (Connection $c, :$drawable!,
+                *%ValueList (
+                    :$Function,
+                    :$PlaneMask,
+                    :$Foreground,
+                    :$Background,
+                    :$LineWidth,
+                    :$LineStyle,
+                    :$CapStyle,
+                    :$JoinStyle,
+                    :$FillStyle,
+                    :$FillRule,
+                    :$Tile,
+                    :$Stipple,
+                    :$TileStippleOriginX,
+                    :$TileStippleOriginY,
+                    :$Font,
+                    :$SubwindowMode,
+                    :$GraphicsExposures,
+                    :$ClipOriginX,
+                    :$ClipOriginY,
+                    :$ClipMask,
+                    :$DashOffset,
+                    :$DashList,
+                    :$ArcMode,
+                    *%ignored,
+               ),
+               ) {
         my $cid = Resource.new(:from($c));
         my $drawableid = 
            $drawable ~~ Window ?? $drawable.wid.value !! $drawable; 
+
         my Any %value_list{GCField} =
             GCForeground, $c.Setup.roots[0].black_pixel,
             GCBackground, $c.Setup.roots[0].white_pixel;
+
+        if +%ValueList{GCField.enums.keys} {
+            %value_list = |%value_list, |(%ValueList.kv.map:
+                -> $k, $v {
+                    if GCField.enums{"GC$k"}:exists {
+                        |(GCField(GCField.enums{"GC$k"}), $v)
+                    }
+                }
+            )
+        }
+
         my $cgrq = CreateGCRequest.new(
             :cid($cid.value), :drawable($drawableid), :%value_list
         );
