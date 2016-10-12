@@ -502,6 +502,255 @@ our class Resource is export {
     }
 }
 
+our class X::X11::NoSuchAtomPair is Exception {
+    has $.connection;
+    has $.message;
+}
+
+our class AtomPair is export {
+    has $.name;
+    has $.value;
+    has $!from;
+
+    submethod BUILD (:$!name, :$!value, :$!from) { }
+
+    # An XCB::Cookie and X11::Connection
+    my class HLCookie is Cookie {
+        has Cookie $.xcb_cookie;
+        has Connection $.connection;
+    }
+
+    #| Alias to .name for compatibility with Perl 6 Pair objects
+    method key { $!name }
+
+    #| The X11::Connection associated with this AtomPair,
+    #| or, for unowned static Atoms, X11::XCB::AtomEnum::Atom
+    method from {
+        given $!from {
+            when Connection { $!from }
+            when HLCookie { $!from.connection }
+            when AtomEnum::Atom { AtomEnum::Atom }
+            when X::X11::NoSuchAtomPair { $!from.connection }
+            when Failure { $!from.exception.connection }
+            default { die "Should not get here " }
+        }
+    }
+
+    #| The X11::XCB::xcb_connection_t associated with this AtomPair,
+    #| or, for unowned static Atoms, X11::XCB::AtomEnum::Atom
+    method xcb {
+        given $!from {
+            when Connection { $!from.xcb }
+            when HLCookie { $!from.connection.xcb }
+            when AtomEnum::Atom { AtomEnum::Atom }
+            when X::X11::NoSuchAtomPair { $!from.connection.xcb }
+            when Failure { $!from.exception.connection.xcb }
+            default { die "Should not get here " }
+        }
+    }
+
+    #| Syncronously finishes searching for the Atom.  If the
+    #| a matching Atom is not found, throws an exception.
+    #| Otherwise returns the name/key of the Atom.
+    method Str {
+        self.valid(:sync);
+        given $!from {
+            when X|Failure { .throw }
+            default { $!name }
+        }
+    }
+
+    #| Syncronously finishes searching for the Atom.  If the
+    #| a matching Atom is not found, throws an exception.
+    #| Otherwise returns the integer value of the Atom.
+    method Numeric {
+        self.valid(:sync);
+        given $!from {
+            when X|Failure { .throw }
+            default { $!value }
+        }
+    }
+
+    #| Returns True if the AtomPair definitely exists, or
+    #| False if result is still pending or no such AtomPair exists.
+    #| If :sync is provided, will wait for result.
+    method valid (:$sync) {
+        if $!from ~~ HLCookie and $sync {
+            my $res = await $!from.xcb_cookie;
+            if $res ~~ Channel {
+                $res .= receive;
+                if $res ~~ GetAtomNameReply {
+                    with $!name {
+                        if $res.name eq $!name {
+                            $!from = $!from.connection;
+                        }
+                        else {
+                            $res =
+                                "Atom #$!value is named {$res.name} not $!name";
+                        }
+                    }
+                    else {
+                        $!from = $!from.connection;
+                        $!name = $res.name
+                    }
+                }
+                elsif $res ~~ InternAtomReply {
+                    with $!value {
+                        if +$res.atom == $!value {
+                            $!from = $!from.connection;
+                        }
+                        else {
+                            $res =
+                                "Atom named \"$!name\" is #{+$res.atom} not #$!value";
+                        }
+                    }
+                    elsif +$res.atom == 0 {
+                        $res = "No dynamic atom named \"$!name\"";
+                    }
+                    else {
+                        $!from = $!from.connection;
+                        $!value = $res.atom
+                    }
+                }
+            }
+            if $res ~~ Failure {
+                $!from = X::X11::NoSuchAtomPair.new(
+                    :connection($!from.connection),
+                    :message("Failure of type {$res.exception.^name} retrieving Atom\n" ~
+                             "Original error message: {$res.exception.message}\n"));
+            }
+            if $res ~~ X {
+                $!from = X::X11::NoSuchAtomPair.new(
+                    :connection($!from.connection),
+                    :message("Error of type {$res.^name} retrieving Atom\n" ~
+                             "Original error message: {$res.message}\n"));
+            }
+            if $res ~~ Str {
+                $!from = Failure.new(X::X11::NoSuchAtomPair.new(
+                    :connection($!from.connection),
+                    :message($res)),
+                );
+            }
+        }
+        (so $!from ~~ Connection) or (so $!from ~~ AtomEnum::Atom);
+    }
+
+    #| Create a new AtomPair.  If a Connection is provided as a positional,
+    #| the AtomPair will remember this connection, even if the Atom requested
+    #| is in the static Atom list.  A :name and/or a :value should be
+    #| provided in either case.  Names or values not in the static Atom list
+    #| will be looked for in the Connection's installed list of Atoms.
+    proto method new (Connection $c?, :$name, :$value) { * }
+
+    multi method new (Connection $c,
+                      Str(Any:D) :$name!, Int(Any:D) :$value!, :$sync) {
+        if AtomEnum::Atom.enums{$name} -> $v {
+            # Static atom, but user wants a connection associated
+            $v == $value
+                ?? self.bless(:from($c), :$name, :$value)
+                !! self.bless(:from(
+                    Failure.new(X::X11::NoSuchAtomPair.new(
+                        :connection($c),
+                        :message("No static atom #$value named \"$name\""),
+                    ))), :$name, :$value);
+        }
+        else {
+            # Have to ask the server
+            my $garq = GetAtomNameRequest.new(:atom($value));
+            my $garp = $garq.send($c);
+            my $res = self.bless(
+                :from(HLCookie.new(:xcb_cookie($garp), :connection($c))),
+                :$name, :$value,
+            );
+            $res.valid(:sync) if $sync;
+            $res;
+        }
+    }
+    multi method new (Connection $c, Str(Any:D) :$name!, :$sync) {
+        if AtomEnum::Atom.enums{$name} -> $value {
+            # Static atom, but user wants a connection associated
+            self.bless(:from($c), :$name, :$value);
+        }
+        else {
+            # Have to ask the server
+            my $iarq = InternAtomRequest.new(:$name, :only_if_exists);
+            my $iarp = $iarq.send($c);
+            my $res = self.bless(
+                :from(HLCookie.new(:xcb_cookie($iarp), :connection($c))),
+                :$name, :value(Nil)
+            );
+            $res.valid(:sync) if $sync;
+            $res;
+        }
+    }
+    multi method new (Connection $c, Int(Any:D) :$value!, :$sync) {
+        if AtomEnum::Atom.enums.pairs.first({$_.value == $value}) -> $p {
+            # Static atom, but user wants a connection associated
+            self.bless(:from($c), :name($p.key), :$value);
+        }
+        else {
+            # Have to ask the server
+            my $garq = GetAtomNameRequest.new(:atom($value));
+            my $garp = $garq.send($c);
+            my $res = self.bless(
+                :from(HLCookie.new(:xcb_cookie($garp), :connection($c))),
+                :name(Nil), :$value,
+            );
+            $res.valid(:sync) if $sync;
+            $res;
+        }
+    }
+    multi method new (Str(Any:D) :$name!, Int(Any:D) :$value!) {
+        my $res;
+        with AtomEnum::Atom.enums{$name} -> $v {
+            if $v == $value {
+                # Static atom, but user wants a connection associated
+                $res = self.bless(:from(AtomEnum::Atom),
+                                  :$name, :$value
+                );
+            }
+        }
+        $res //=
+            self.bless(:from(Failure.new(X::X11::NoSuchAtomPair.new(
+                :connection(AtomEnum::Atom),
+                :message("No static atom #$value named \"$name\"")))),
+            :$name, :$value);
+        $res;
+    }
+    multi method new (Str(Any:D) :$name!) {
+        # Ownerless static atom, lookup by name
+        with AtomEnum::Atom.enums{$name} -> $value {
+            self.bless(:from(AtomEnum::Atom), :$name, :$value);
+        }
+        else {
+            self.bless(:from(Failure.new(X::X11::NoSuchAtomPair.new(
+                :connection(AtomEnum::Atom),
+                :message("No static atom named \"$name\"")))),
+            :$name, :value(Nil));
+        }
+    }
+    multi method new (Int(Any:D) :$value!) {
+        # Ownerless static atom, lookup by value
+        with AtomEnum::Atom.enums.pairs.first({$_.value == $value}) -> $p {
+            self.bless(:from(AtomEnum::Atom),
+                       :name($p.key), :$value);
+        }
+        else {
+            self.bless(:from(Failure.new(X::X11::NoSuchAtomPair.new(
+                :connection(AtomEnum::Atom),
+                :message("No static atom #$value")))),
+            :name(Nil), :$value);
+        }
+    }
+    multi method new {
+        die "{::?CLASS.^name}.new usage:\n" ~ self.^find_method("new").WHY;
+    }
+
+    method intern {
+    }
+
+}
+
 our class Font is export {
     has Resource $.fid;
     has $.encoding;
