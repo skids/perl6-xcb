@@ -507,6 +507,12 @@ our class X::X11::NoSuchAtomPair is Exception {
     has $.message;
 }
 
+#| An AtomPair is the name and value of an X11 ATOM, which can also
+#| remember which connection it belongs to.  It supports a .key
+#| method as well to make it function a bit like a Perl 6 Pair (currently
+#| it is not an Associative, but could become one in the future.)
+#| Creating (or more usually, finding) an AtomPair can be done both
+#| syncronously and asyncronously.
 our class AtomPair is export {
     has $.name;
     has $.value;
@@ -635,13 +641,21 @@ our class AtomPair is export {
         (so $!from ~~ Connection) or (so $!from ~~ AtomEnum::Atom);
     }
 
-    #| Create a new AtomPair.  If a Connection is provided as a positional,
-    #| the AtomPair will remember this connection, even if the Atom requested
-    #| is in the static Atom list.  A :name and/or a :value should be
+    #| Find an existing atom.  If a Connection is provided as a positional,
+    #| the AtomPair will remember this connection, even if the atom requested
+    #| is in the static atom list.  A :name and/or a :value should be
     #| provided in either case.  Names or values not in the static Atom list
     #| will be looked for in the Connection's installed list of Atoms.
-    proto method new (Connection $c?, :$name, :$value) { * }
+    #|
+    #| See .intern if you need to create a new atom.
+    proto method new ($c?, $a?, :$name, :$value) { * }
 
+    multi method new (AtomEnum::Atom $a) {
+        self.bless(:from(AtomEnum::Atom), :name($a.Str), :value($a.value));
+    }
+    multi method new (Connection $c, AtomEnum::Atom $a) {
+        self.bless(:from($c), :name($a.Str), :value($a.value));
+    }
     multi method new (Connection $c,
                       Str(Any:D) :$name!, Int(Any:D) :$value!, :$sync) {
         if AtomEnum::Atom.enums{$name} -> $v {
@@ -746,7 +760,30 @@ our class AtomPair is export {
         die "{::?CLASS.^name}.new usage:\n" ~ self.^find_method("new").WHY;
     }
 
-    method intern {
+    #| The alternative constructor .intern may be used to install a previously
+    #| nonexistent atom into a Connnection.  The Connection positional is
+    #| mandatory as is a :name.  A value may not be chosen, as the Connection
+    #| gets to choose that.  Note that atoms are installed permanantly for the
+    #| rest of the process runtime of an X11 server, so they should be used
+    #| sparingly, like unto SYSV IPC IDs.  If the atom already exists, the
+    #| object is still created using the existing value.  If :sync, then the
+    #| call waits for the creation to complete before returning.
+    method intern (Connection $c, :$name, :$sync) {
+        if AtomEnum::Atom.enums{$name} -> $value {
+            # Static atom, but user wants a connection associated
+            self.bless(:from($c), :$name, :$value);
+        }
+        else {
+            # Have to ask the server
+            my $iarq = InternAtomRequest.new(:$name, :!only_if_exists);
+            my $iarp = $iarq.send($c);
+            my $res = self.bless(
+                :from(HLCookie.new(:xcb_cookie($iarp), :connection($c))),
+                :$name, :value(Nil)
+            );
+            $res.valid(:sync) if $sync;
+            $res;
+        }
     }
 
 }

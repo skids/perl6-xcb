@@ -3,7 +3,7 @@ use lib <blib/lib lib>;
 
 use Test;
 
-plan 96;
+plan 105;
 
 use X11;
 use X11::XCB::XProto;
@@ -59,7 +59,7 @@ is $nxa.name, $nxname, "Invalid static AtomPair (value and invalid name) name is
 throws-like { +$nxa }, X::X11::NoSuchAtomPair, message => "No static atom #4 named \"$nxname\"";
 nok $nxa.valid, "Invalid static AtomPair (value and invalid name) is not .valid";
 
-throws-like {AtomPair.new()}, X::AdHoc, message => /:s X11\:\:AtomPair\.new usage\: Create a new AtomPair/;
+throws-like {AtomPair.new()}, X::AdHoc, message => /:s X11\:\:AtomPair\.new usage\: Find an existing atom/;
 
 my $c = Connection.new;
 
@@ -183,3 +183,21 @@ is-deeply $nxa.xcb, $c.xcb,
    "Invalid dynamic atom (invalid and invalid name) correct xcb";
 throws-like { +$nxa }, X::X11::NoSuchAtomPair, message => "Atom #4 is named ATOM not $nxname";
 nok $nxa.valid, "Invalid dynamic AtomPair (value and invalid name) is not .valid";
+
+
+$primary = AtomPair.new(AtomEnum::Atom::PRIMARY);
+ok $primary ~~ AtomPair, "Can create known-good static AtomPair (from enum)";
+ok $primary.from === $primary.xcb  === AtomEnum::Atom,
+   "Static atom (from enum) owned by AtomEnum::Atom";
+is $primary.name, "PRIMARY", "Static AtomPair (from enum) name is correct";
+is $primary.value, 1, "Static AtomPair (from enum) value is correct";
+
+$primary = AtomPair.new($c, AtomEnum::Atom::PRIMARY);
+ok $primary ~~ AtomPair, "Can create known-good static AtomPair (from enum/connection)";
+is-deeply $primary.from, $c,
+   "known-good static AtomPair (from enum/connection) correct connection";
+is-deeply $primary.xcb, $c.xcb,
+   "known-good static AtomPair (from enum/connection) correct xcb";
+is $primary.name, "PRIMARY", "Static AtomPair (from enum/connection) name is correct";
+is $primary.value, 1, "Static AtomPair (from enum/connection) value is correct";
+
