@@ -1045,3 +1045,47 @@ our class GC is export {
     }
 
 }
+
+#| X11 server timestamps.  These are 32-bit milliseconds values.
+#| As such, fancy wrapping rules apply.  There is also a special
+#| value CurrentTime(0) which needs to be handled specially.
+our class TimeStamp is Int is export(:internal) {
+
+    #| Subtract $before from $after, according to X11 timestamp wrapping rules.
+    #| The result will be positive if the X11 server will consider $after to
+    #| have occurred after $before, but the result is not correct for times
+    #| separated by more than about 24.8 days.  A zero reult means the server
+    #| will consider the two times to be equal.
+    #|
+    #| Note: neither argument should be 0 (CurrentTime).  That value should
+    #| be checked for and handled appropriately before using this, else results
+    #| may not be of any value.
+    multi method infix:<-> (TimeStamp $after: TimeStamp $before)
+        is export(:internal) {
+        if $before < $after {
+            if $after - $before <= 0x80000000 {
+                # Within a half wrap (called a "month" on server)
+                $after - $before;
+            }
+            else {
+                # Outside a half wrap, therefore in the past
+                -(($before +| 0x100000000) - $after);
+            }
+        }
+        elsif $before > $after {
+            if $before - $after <= 0x80000000 {
+                # Within a half wrap (called a "month" on server)
+                -($before - $after);
+            }
+            else {
+                ($after +| 0x100000000) - $before;
+            }
+        }
+        else {
+            0
+        }
+    }
+
+    # TODO add/subtract Int with Failure if wrap exceeded
+
+}
