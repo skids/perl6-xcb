@@ -334,12 +334,12 @@ our role Error[$error_code] is export(:internal) {
     #| parameterization.  Takes a (positional) pointer to a raw protocol
     #| packet containing an error, a :error_bases array containing a list
     #| of alternating error base values and errorcode maps, and an
-    #| associated :error_bases_lock to serialize access.  An lvalue :length to
+    #| associated :error_lock to serialize access.  An lvalue :length to
     #| prevent buffer overruns must be supplied (but can be Inf).
     #| This will be altered based on the encountered structure.
     #| Finally is :!free is not passed the raw protocol packet will
     #| be freed.
-    method subclass (Pointer $p, :$error_bases!, :$error_bases_lock!,
+    method subclass (Pointer $p, :$error_bases!, :$error_lock!,
                      :$left! is rw, :$free = True) {
 
         my class errorstub is repr("CStruct") {
@@ -350,7 +350,7 @@ our role Error[$error_code] is export(:internal) {
         # XXX workaround negative uint8.  Needs RT
         my $code = nativecast(errorstub, $p).error_code +& 0xff;
         my $cl;
-        $error_bases_lock.protect: {
+        $error_lock.protect: {
             for |$error_bases -> $k, $v {
                 next if $k > $code;
                 if $v{$code - $k}:exists {
@@ -429,18 +429,18 @@ our role Event[$event_code] is export(:internal) {
     #| parameterization.  Takes a (positional) pointer to a raw protocol
     #| packet containing an event, a :event_bases array containing a list
     #| of alternating event base values and eventcode maps, and an
-    #| associated :event_bases_lock to serialize access.  An lvalue :length to
+    #| associated :event_lock to serialize access.  An lvalue :length to
     #| prevent buffer overruns must be supplied (but can be Inf).
     #| This will be altered based on the encountered structure.
     #| Finally is :!free is not passed the raw protocol packet will
     #| be freed.
-    method subclass (Pointer $p, :$event_bases!, :$event_bases_lock!,
+    method subclass (Pointer $p, :$event_bases!, :$event_lock!,
                      :$left! is rw, :$free = True) {
 
         die "Packet too short" unless $left >= nativesizeof(Event::cstruct);
         my $code = nativecast(Event::cstruct, $p).code +& 0x7f;
         my $cl;
-        $event_bases_lock.protect: {
+        $event_lock.protect: {
             for |$event_bases -> $k, $v {
                 next if $k > $code;
                 if $v{$code - $k}:exists {
@@ -681,3 +681,22 @@ our role Request [$opcode, $ext, $isvoid] is export(:internal) {
         @r.elems == 1 ?? @r[0] !! |@r;
     }
 }
+
+# XXX POD on this causes compilation issues
+#   #| Interface defining how to set/get an event-mask for events.  Should
+#   #| be supplied for each event-mask by the responsible module.
+our role Selector [Int $opcode] is export {
+#    #| used an an extension identfier
+    method opcode { $opcode };
+
+#    #| build a request that will set $from's event-mask to $event-mask
+    method setrq (uint32 $from, uint32 $event-mask --> Request) {...};
+
+#    #| build a request that will get $from's event-mask
+    method getrq (uint32 $from --> Request) {...};
+
+#    #| extract the event-mask from the $reply to the request made by .getrq
+    method mask (Reply $reply --> uint32) {...};
+}
+
+

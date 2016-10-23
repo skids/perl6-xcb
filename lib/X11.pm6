@@ -19,8 +19,22 @@ our class AuthInfo is export {
 
 my constant @ganr = buf16.new(0x1717,2), buf32.new(4); # abuse pad for endian
 
+our class X::X11::NoReply is Exception {
+    method message { "No Reply" }
+}
+
+# XXX seems not to work here, but works below Connection... ?!?
+#our class Window is export {...}
+#our class Resource is export {...}
+
 our class Connection is export {
     has xcb_connection_t $.xcb;
+
+    #| A map of how many times this connection has subscribed to events
+    #| from various windows.  Keyed by low level window id, containing
+    #| BagHashes which are keyed by the event number.
+    has BagHash %.evmasks;
+
     has $.Setup;
 
     has uint32 $!screen = 0;
@@ -37,8 +51,9 @@ our class Connection is export {
     has $.error_bases is rw;
     has $.event_bases is rw;
     #| Lock for preventing simultaneous access to error/event bases
-    has Lock $.error_bases_lock = Lock.new();
-    has Lock $.event_bases_lock = Lock.new();
+    #| (May be used in future for runtime extension loading)
+    has Lock $.error_lock = Lock.new();
+    has Lock $.event_lock = Lock.new();
 
     method flush { xcb_flush($!xcb) }
 
@@ -105,8 +120,8 @@ our class Connection is export {
     # the parent gracefuly.
     my sub wait(Channel $cookies, Channel $watch, Channel $destroying,
                 xcb_connection_t $xcb is raw,
-                $error_bases, $error_bases_lock,
-                $event_bases, $event_bases_lock) {
+                $error_bases, $error_lock,
+                $event_bases, $event_lock) {
 
         use NativeCall;
         constant $null = Pointer.new(0);
@@ -146,7 +161,7 @@ our class Connection is export {
             return Nil unless $err.defined;
             my $left = Inf;
             my $res = RequestError.subclass(nativecast(Pointer,$err),
-                                            :$error_bases, :$error_bases_lock,
+                                            :$error_bases, :$error_lock,
                                             :$left, :free);
 
             my class stub is repr('CStruct') {
@@ -265,7 +280,7 @@ our class Connection is export {
                                 my $left = Inf;
                                 my $res = eventstub.subclass(
                                     nativecast(Pointer,$ev), :$left, :free,
-                                    :$event_bases, :$event_bases_lock
+                                    :$event_bases, :$event_lock
                                 );
                                 $watcher.send($res)
                             });
@@ -337,7 +352,8 @@ our class Connection is export {
                             start {
                                 $ev = error_to_exception($ev,
                                                      $p.promise.reply_type);
-                                $p.break($ev === Any ?? "No Response" !! $ev);
+                                $p.break($ev === Any ?? X::X11::NoReply.new
+                                                     !! $ev);
                             }
                         };
                         $sent = Nil;
@@ -394,8 +410,8 @@ our class Connection is export {
         }
     }
     has $.waiter = wait($!cookies, $!watch, $!destroying, $!xcb,
-                        $!error_bases, $!error_bases_lock,
-                        $!event_bases, $!event_bases_lock);
+                        $!error_bases, $!error_lock,
+                        $!event_bases, $!event_lock);
 
     method DESTROY {
         $!res_ask.close;
@@ -486,6 +502,104 @@ our class Connection is export {
     multi method new (*%extra) {
         self.new(Str, |%extra);
     }
+
+
+    my sub bagify_mask(Int $event_mask is copy, Int $base is copy) {
+        my $res = BagHash.new;
+	while $event_mask {
+            $res{$base}++ if $event_mask +& 1;
+            $base++;
+            $event_mask +>= 1;
+        }
+        $res;
+    }
+    my sub maskify_set(Set $b, Int $base is copy) {
+        my Int $res = 0;
+	for $b.keys {
+            next if ($_ - $base) >= 32;
+            $res +|= 1 +< ($_ - $base);
+        }
+        $res;
+    }
+
+    #| Start delivery of specific events to this connection, if they
+    #| are not already being sent.
+    #|
+    #| Each X11 resource, which may belong to another client, can keep its
+    #| own event mask for any X11 connection which asks for events from it.
+    #| Event masks for each X11 protocol extension are kept seperately by
+    #| each resource and must be set separately.  X11 resources do not,
+    #| however, count how many times the same connection has asked for a
+    #| particular event to be delivered.
+    #|
+    #| This method should be called to set event masks while thread-safely
+    #| incrementing counters which keep track of how many things are
+    #| interested in each category of event.  The first argument is the
+    #| resource (window, or perhaps something else) which will produce events,
+    #| and the second is an (extension-specific) mask of what type of events
+    #| this resource should deliver to this connection.  The third argument
+    #| is a type-object supplied by the extension to which the event-mask
+    #| belongs, which contains instructions on how to set the mask.
+    #| Usually this is available as "::EventSelector" inside the namespace of
+    #| the extension.
+    #|
+    #| The return value will either be Bool::False, in which case there was
+    #| no need to request these events because they are already being delivered,
+    #| or an XCB::Cookie which could be awaited on to ensure the mask has been
+    #| set before doing anything else... perhaps after flushing.
+    proto method follow ($from, Int $event-mask, Selector $sel) {*}
+#    multi method follow (Window $from, Int $event-mask, Selector $sel) {
+#        callwith($from.wid.value, $event-mask, $event-mask, $sel)
+#    }
+#    multi method follow (Resource $from, Int $event-mask, Selector $sel) {
+#        callwith($from.value, $event-mask, $event-mask, $sel)
+#    }
+    multi method follow (Int $from, Int $event-mask, Selector $sel) {
+        my $emtmp = $event-mask;
+        my $new = bagify_mask($event-mask, $sel.opcode +< 32);
+        my $need = False;
+
+        # We can probably share this lock
+        $!event_lock.protect: {
+            my $already := %.evmasks{$from};
+            $already //= BagHash.new; # XXX delete this someday, fixed upstream
+            if $new.Set (-) $already.Set {
+               $already = ($already (+) $new).BagHash; # XXX (+) produce BagHash?
+	       $need = maskify_set($already.Set, $sel.opcode);
+               $need = $sel.setrq($from, $need).send($.xcb);
+            }
+        }
+        $need;
+    }
+    #| Same as .follow, but stops delivery of the specified events, unless
+    #| something else has also asked for them.
+    proto method unfollow ($from, Int $event-mask, Selector $sel) {*}
+#    multi method unfollow (Window $from, Int $event-mask, Selector $sel) {
+#        callwith($from.wid.value, $event-mask, $event-mask, $sel)
+#    }
+#    multi method unfollow (Resource $from, Int $event-mask, Selector $sel) {
+#        callwith($from.value, $event-mask, $event-mask, $sel)
+#    }
+    multi method unfollow (Int $from, Int $event-mask, Selector $sel) {
+        my $emtmp = $event-mask;
+        my $new = bagify_mask($event-mask, $sel.opcode +< 32);
+        my $need = False;
+
+        # We can probably share this lock
+        $!event_lock.protect: {
+            my $already := %.evmasks{$from};
+            if $already.defined {
+                if $already.Set (-) ($already (-) $new).Set {
+                    $already = ($already (-) $new).BagHash;
+	            $need = maskify_set($already.Set, $sel.opcode);
+                    $need = $sel.setrq($from, $need).send($.xcb);
+                }
+            }
+            # TODO: clean up empty masks
+        }
+        $need;
+    }
+    # TODO: facility for removing entries on resource destruction
 }
 
 our class Resource is export {
@@ -932,7 +1046,15 @@ our class Window is export {
             :$depth, :$x, :$y, :$width, :$height, :$border_width,
             :$class, :parent($parentid), :$visual, :%value_list
         );
-        $cwrq.send($c);
+        # Mildly cheezy here -- we create the window via the API to follow
+        # its events, which is just as happy to send a CreateWindowRequest as
+        # a ChangeWindowAttributesRequest.
+        my class CreateWindowSelector does Selector[0] {
+            method getrq ($) { Nil };
+            method mask ($) { Nil };
+            method setrq ($,$) { $cwrq }
+        }
+        $c.follow($wid.value, %value_list{CWEventMask}, CreateWindowSelector);
         $c.flush;
         # TODO monitor errors
         if $map {
@@ -955,7 +1077,7 @@ our class Window is export {
     method tail-isvoid ($req, :$sync) {
         if ($sync) {
             my $fail = $req.demand($.wid.from);
-            return $fail.message ~~ 'No Response' ?? True !! $fail;
+            return $fail ~~ X::X11::NoReply ?? True !! $fail;
         }
         else {
             $req.send($.wid.from);
@@ -975,6 +1097,7 @@ our class Window is export {
     submethod DESTROY {
         my $dw = DestroyWindowRequest.new(:window($!wid.value));
         $dw.send($!wid.from);
+        # TODO: clean event masks from connection
     }
 
 }
@@ -1089,3 +1212,4 @@ our class TimeStamp is Int is export(:internal) {
     # TODO add/subtract Int with Failure if wrap exceeded
 
 }
+
