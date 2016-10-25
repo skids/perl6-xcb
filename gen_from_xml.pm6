@@ -50,6 +50,7 @@ class mod {
     has %.subclasses is rw;
     has @.cstructs is rw;
     has @.p6classes is rw;
+    has $.epilogue is rw;
     has %.opcodes is rw;
     has %.errors is rw;
     has %.events is rw;
@@ -89,6 +90,7 @@ sub MAIN (:$xmldir? is copy) {
     MakeEvents2($_) for @mods;
     MakeReplies($_) for @mods;
     MakeRequests($_) for @mods;
+    MakeEpilogue($_) for @mods;
 #.enums.say for @mods;
     Output($_) for @mods;
 }
@@ -796,6 +798,8 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                             unless $.event ~~ Buf|Event;
                         my @bytes = |(|nativecast(CArray[uint8],$_)[^$_.bytes]
                                       for $.event.bufs);
+                        # pad out
+                        @bytes[+@bytes..31] = 0 xx *;
                         @bufs.push(Blob.new(|@bytes));
                     }
                     EOSP
@@ -1967,6 +1971,47 @@ sub MakeRequests($mod) {
     $mod.p6classes.append(@p6classes);
 }
 
+sub MakeEpilogue($mod) {
+    my $i = 0;
+    my %selectors =
+         "xproto" => qq:to<EOXP>,
+              our class EventSelector does Selector[{$i++}] \{
+                  method setrq (\$window, \$event-mask) \{
+                      ChangeWindowAttributesRequest.new(:\$window,
+                          :value_list(CWEnum::CWEventMask, \$event-mask)
+                      )
+                  }
+                  method getrq (\$) \{ } # TODO
+                  method mask (\$) \{ } # TODO
+              }
+              EOXP
+         "xfixes" => qq:to<EOXF>,
+              # In this case, pass an instance with the receiver :window
+              our class EventSelector does Selector[{$i}] \{
+                  has \$\.window;
+                  method opcode \{ (\$\.window +< 8) +| {$i++} }
+                  method setrq (\$selection, \$event_mask) \{
+                      SelectSelectionInputRequest.new(
+                          :\$\.window, :\$selection, :\$event_mask
+                      )
+                  }
+                  method getrq (\$) \{ } # TODO
+                  method mask (\$) \{ } # TODO
+              }
+              EOXF
+         "screensaver" => qq:to<EOSS>,
+              our class EventSelector does Selector[{$i++}] \{
+                  method setrq (\$drawable, \$event_mask) \{
+                      ScreenSaverSelectInputRequest.new(:\$drawable,:\$event_mask)
+                  }
+                  method getrq (\$) \{ } # TODO
+                  method mask (\$) \{ } # TODO
+              }
+              EOSS
+         ;
+
+    $mod.epilogue = %selectors{$mod.cname} // "";
+}
 
 sub Output ($mod) {
     my $out = "./lib/X11/XCB/$mod.outname()".IO;
@@ -1994,6 +2039,8 @@ sub Output ($mod) {
                 EOAT
         )
     }
+
+    $out.print($mod.epilogue);
 
     $out.print(qq:to<EOEH>);
         our \$errorcodes = :\{

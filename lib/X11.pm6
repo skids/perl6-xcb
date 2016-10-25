@@ -1213,3 +1213,134 @@ our class TimeStamp is Int is export(:internal) {
 
 }
 
+our class Selection is export {
+
+    use X11::XCB :internal;
+    use X11::XCB::XProto :internal;
+
+    has Window $.owner;
+    has AtomPair $.id;
+    has Int $.begin;
+    has Real $.end = Inf;
+    has %.requests;
+    has Promise $.init;
+    has Lock $.lock = Lock.new;
+
+    #| Make :$window the owner of the selection :$id, and retain state
+    #| such that :$content can be delivered to requesters of that selection.
+    #| This object will pretty much handle all the finagling details of
+    #| maintaining an X11 selection, just so long as all relevent events
+    #| are later supplied to it with the .event method.
+    proto method new (:$owner!, :$id!, :$content!) {*}
+
+    multi method new (Window:D :$owner!, AtomPair:D :$id!,
+                      Event:D :$event!, :$content!) {
+        self.new(:$owner, :$id, :time($event.time), :$content);
+    }
+    multi method new (Window:D :$owner!, AtomPair:D :$id!,
+                      Int:D :$time!, :$content!) {
+        my $init = start {
+            my $ssorp = SetSelectionOwnerRequest.new(
+                :owner($owner.wid.value), :selection($id.value), :$time
+            ).send($owner.wid.from);
+            my $gsorp = GetSelectionOwnerRequest.new(
+                :selection($id.value)
+            ).send($owner.wid.from);
+            my $x = False;
+            $ssorp = await $ssorp;
+            # Under normal operation we expect to receive a X::X11::NoReply
+            # when waiting on the Cookie, as this is a void request.  Another
+            # possibility is a single error.
+            CATCH {
+                when X::X11::NoReply { $x = $_; $_.resume }
+                default { .message.note }
+            };
+            if      $x 
+                and (($gsorp .= result) ~~ Channel)
+                and (($gsorp .= receive) ~~ GetSelectionOwnerReply)
+                and $gsorp.owner == $owner.wid.value {
+                True
+            }
+            else {
+                # TODO: emit some error noise maybe
+                False
+            }            
+        }
+        self.bless(:$owner, :$id, :begin(TimeStamp.new($time)), :$content,
+                   :$init);
+    }
+
+    #| Generate a key for %requests, used to guarantee sequence of processing
+    #| requests which only differ in property per ICCCM conventions.
+    my sub rqid (SelectionRequestEvent $event) {
+        given $event {
+            buf32.new(.requestor, .selection, .target, .time).decode("latin-1")
+        }
+    }
+
+    #| Refuse a SelectionRequest.  Can be called without an instance, but in this
+    #| case, a :connection must be supplied on which to send the refusal.
+    #| Returns a Cookie which may be waited on to ensure that the refusal has
+    #| been sent... perhaps after flushing.
+    method refuse (SelectionRequestEvent $req,
+                   :$connection = $.owner.wid.from
+                  ) {
+        my $sne = SelectionNotifyEvent.new(
+            :requestor($req.requestor), :target($req.target), :property(None),
+            :selection($req.selection), :time($req.time)
+        );
+        my $serp = SendEventRequest.new(
+            :destination($req.requestor), :event_mask(0),
+            :propagate(0), :event($sne)
+        ).send($connection);
+    }
+
+    #| Handle a SelectionRequest.
+    multi method request (Selection:D: SelectionRequestEvent $req) {
+        $!init.then(
+            -> $ok is copy {
+                $ok = $ok.status == PromiseStatus::Kept ?? $ok.result !! False;
+                my &todo;
+                # TODO check timestamp
+                $ok = False;
+                if $ok {
+                    &todo = {
+"NYI Actually responding to successful SelectionRequest".note;
+                    }
+                }
+                else {
+                    &todo = {
+                        my $serp = self.refuse($req);
+                        my $x = False;
+                        $serp = await $serp;
+                        # Under normal operation we expect to receive a X::X11::NoReply
+                        # when waiting on the Cookie, as this is a void request.  Another
+                        # possibility is a single error.
+                        CATCH {
+                            when X::X11::NoReply { $x = $_; $_.resume }
+                            default { $x.message.note }
+                        };
+                        False
+                    }
+                }
+                my $rqid = rqid($req);
+                $!lock.protect: {
+                    if %!requests{$rqid}:exists {
+                        %!requests{$rqid} .= then(&todo);
+                    }
+                    else {
+                        %!requests{$rqid} = Promise.start(&todo);
+                    }
+                }
+            }
+        );
+    }
+
+    multi method end (Int $time is copy) {
+        $!lock.protect: { $!end = $time; }
+    }
+    multi method end (Event $event) {
+        $!lock.protect: { $!end = $event.time; }
+    }
+}
+

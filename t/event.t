@@ -3,7 +3,7 @@ use lib <blib/lib lib>;
 
 use Test;
 
-plan 9;
+plan 10;
 
 use NativeCall;
 use X11;
@@ -42,11 +42,23 @@ my $cw = CreateWindowRequest.new(
 
 $cw.send($c);
 
+my $sne = SelectionNotifyEvent.new(
+     :requestor(0x1), :target(0x2), :property(0x3),
+     :selection(0x4), :time(0x5)
+);
+
+my $se = SendEventRequest.new(:destination($wid.value), :event_mask(0), :propagate(0), :event($sne));
+$se.send($c);
+my $res = $w.receive;
+# finagle the sequence number
+$sne.sequence = $res.sequence;
+is-deeply $res, $sne, "Received short event from SendEvent";
+
 my $cme = ClientMessageEvent.new(:window($wid.value), :0type, :data(buf8.new(1..20)));
-my $se = SendEventRequest.new(:destination($wid.value), :event_mask(0), :propagate(0), :event($cme));
+$se = SendEventRequest.new(:destination($wid.value), :event_mask(0), :propagate(0), :event($cme));
 $se.send($c);
 
-my $res = $w.receive;
+$res = $w.receive;
 # finagle the sequence number
 $cme.sequence = $res.sequence;
 is-deeply $res, $cme, "Received event from SendEvent";
