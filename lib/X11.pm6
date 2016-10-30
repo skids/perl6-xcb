@@ -1220,11 +1220,15 @@ our class Selection is export {
 
     has Window $.owner;
     has AtomPair $.id;
+    has AtomPair @.oktargets;
     has Int $.begin;
     has Real $.end = Inf;
     has %.requests;
-    has Promise $.init;
+    has Promise $.init is rw;
     has Lock $.lock = Lock.new;
+    has $.content;
+
+    role Content { }
 
     #| Make :$window the owner of the selection :$id, and retain state
     #| such that :$content can be delivered to requesters of that selection.
@@ -1239,13 +1243,19 @@ our class Selection is export {
     }
     multi method new (Window:D :$owner!, AtomPair:D :$id!,
                       Int:D :$time!, :$content!) {
-        my $init = start {
+        my $res = self.bless(:$owner, :$id, :begin(TimeStamp.new($time)),
+                             :$content);
+        $res.init = start {
+            my $c = $owner.wid.from;
+            my $wxcb = $owner.wid.value;
+            my AtomPair @oktargets;
+
             my $ssorp = SetSelectionOwnerRequest.new(
-                :owner($owner.wid.value), :selection($id.value), :$time
-            ).send($owner.wid.from);
+                :owner($wxcb), :selection($id.value), :$time
+            ).send($c);
             my $gsorp = GetSelectionOwnerRequest.new(
                 :selection($id.value)
-            ).send($owner.wid.from);
+            ).send($c);
             my $x = False;
             $ssorp = await $ssorp;
             # Under normal operation we expect to receive a X::X11::NoReply
@@ -1255,10 +1265,25 @@ our class Selection is export {
                 when X::X11::NoReply { $x = $_; $_.resume }
                 default { .message.note }
             };
-            if      $x 
+            # Grab our atoms.  This will also make the above request flush
+            # back out sooner.
+            @oktargets = AtomPair.new($c, :name<MULTIPLE>),
+                         AtomPair.new($c, :name<TARGETS>),
+                         AtomPair.new($c, :name<TIMESTAMP>);
+
+            # Provide some default behaviors for core Perl 6 types
+            given $content {
+                when Content { }
+                when Str {
+                    @oktargets.append: AtomPair.new($c, :name<UTF8_STRING>)
+                }
+            }
+            .valid(:sync) for @oktargets;
+            $res.oktargets = @oktargets;
+            if      $x
                 and (($gsorp .= result) ~~ Channel)
                 and (($gsorp .= receive) ~~ GetSelectionOwnerReply)
-                and $gsorp.owner == $owner.wid.value {
+                and $gsorp.owner == $wxcb {
                 True
             }
             else {
@@ -1266,8 +1291,7 @@ our class Selection is export {
                 False
             }            
         }
-        self.bless(:$owner, :$id, :begin(TimeStamp.new($time)), :$content,
-                   :$init);
+        $res
     }
 
     #| Generate a key for %requests, used to guarantee sequence of processing
@@ -1295,6 +1319,21 @@ our class Selection is export {
         ).send($connection);
     }
 
+    #| Notify a selection requestor that we have honored the request
+    method receipt (SelectionRequestEvent $req,
+                    :$connection = $.owner.wid.from
+                   ) {
+        my $sne = SelectionNotifyEvent.new(
+            :requestor($req.requestor), :target($req.target),
+            :property($req.property), :selection($req.selection),
+            :time($req.time)
+        );
+        my $serp = SendEventRequest.new(
+            :destination($req.requestor), :event_mask(0),
+            :propagate(0), :event($sne)
+        ).send($connection);
+    }
+
     #| Handle a SelectionRequest.
     multi method request (Selection:D: SelectionRequestEvent $req) {
         $!init.then(
@@ -1302,10 +1341,166 @@ our class Selection is export {
                 $ok = $ok.status == PromiseStatus::Kept ?? $ok.result !! False;
                 my &todo;
                 # TODO check timestamp
-                $ok = False;
                 if $ok {
                     &todo = {
-"NYI Actually responding to successful SelectionRequest".note;
+
+                        my $c = self.owner.wid.from;
+                        my $multi = False;
+                        my $did = 0;
+                        my @mod_targets;
+
+                        # Legacy client support per ICCCM
+                        my $property = $req.property || $req.selection;
+
+                        my $target = @.oktargets.first(*.value == $req.target);
+                        $target //= AtomPair.new($c, :value($req.target));
+
+                        if $target.valid(:sync) {
+                            my $targets;
+                            my $multiatom; # So we don't have to look it back up.
+                            if $target.key eq "MULTIPLE" {
+                                $multi = True;
+                                # TODO: convenience function for GetProperty including long properties
+                                # note, after this TODO, $targets may end up being bound to a Seq 
+                                # for long requests, and it should be a cached Seq
+                                my $gprp = GetPropertyRequest.new(
+                                    :window($req.requestor),
+                                    :property($req.property),
+                                    :type(AtomEnum::Atom),
+                                    :long-offset(0),
+                                    :long-length(1024), # We'll cap this for now
+                                    :delete(+False)
+                                ).send($c);
+                                my $x = False;
+                                $gprp = (await $gprp).receive;
+                                CATCH {
+                                    default { 
+                                        $x = $_; .message.note; $_.resume;
+                                    }
+                                };
+                                if (not $x) and ($gprp ~~ GetPropertyReply) {
+                                    $targets = $gprp.value.values;
+                                }
+                            }
+                            else {
+                                $targets := [ $req.property, $target.value ];
+                            }
+                            for $targets -> $prop is copy, $targval? {
+
+                                @mod_targets.append: $prop;
+
+                                # Unspecced MULTIPLE corner case. Best guess.
+                                $prop ||= $req.selection;
+
+                                with $targval {
+                                    @mod_targets.append: $targval;
+
+                                    my $target = @.oktargets.first(*.value == $targval);
+                                    $target //= :NONE(0);
+
+                                    if $target.key eq "TARGETS" {
+                                        my Int @oktargets = @.oktargets.map(*.value);
+                                        if @oktargets.first(Int:U) === Int {
+                                            warn "Could not find all atoms for TARGETS target";
+                                        }
+                                        # TODO: check response (but after the .follow)
+                                        ChangePropertyRequest.new(
+                                            :mode(PropModeEnum::Replace),
+                                            :window($req.requestor),
+                                            :property($prop),
+                                            :type(AtomEnum::ATOM),
+                                            :data(buf32.new(@oktargets.grep(Int:D)))
+                                        ).send($c);
+                                        $did++;
+                                    }
+                                    elsif $target.key eq "TIMESTAMP" {
+                                        # TODO: check response (but after the .follow)
+                                        ChangePropertyRequest.new(
+                                            :mode(PropModeEnum::Replace),
+                                            :window($req.requestor),
+                                            :property($prop),
+                                            :type($target.value),
+                                            :data(buf32.new(+self.begin))
+                                        ).send($c);
+                                        $did++;
+                                    }
+                                    else {
+                                        CATCH { $_.warn }
+                                        given $.content {
+                                            when Content {
+                                                my $type, my $data;
+                                                ($type, $data) =
+                                                    $.content.convert($req, $target);
+
+                                                ChangePropertyRequest.new(
+                                                    :mode(PropModeEnum::Replace),
+                                                    :window($req.requestor),
+                                                    :property($prop),
+                                                    :type($target.value),
+                                                    :$data
+                                                ).send($c);
+
+                                                @mod_targets[*-1] = $type;
+                                                $did++;
+                                            }
+                                            when Str {
+                                                my $oktarg = @.oktargets.first(*.value == $targval);
+                                                if $oktarg and $oktarg.key eq "UTF8_STRING" {
+                                                    ChangePropertyRequest.new(
+                                                        :mode(PropModeEnum::Replace),
+                                                        :window($req.requestor),
+                                                        :property($prop),
+                                                        :type($oktarg.value),
+                                                        :data($.content.encode("utf8"))
+                                                    ).send($c);
+                                                    $did++;
+                                                }
+                                                else {
+                                                    #TODO other string types
+                                                    warn "NYI conversion of Str to {AtomPair.new($c,:value($targval), :sync).key}";
+                                                    @mod_targets[*-1] = None;
+                                                }
+                                            }
+                                            default {
+                                                warn "NYI target type {AtomPair.new($c,:value($targval), :sync).key}";
+                                                @mod_targets[*-1] = None;
+                                            }
+                                        }
+                                    }
+                                }
+                                if $did == 1 {
+                                    $c.follow(
+                                        $req.requestor, EventMaskEnum::PropertyChange,
+                                        X11::XCB::XProto::EventSelector
+                                    );
+                                    # TODO: check response from ChangeProperty
+                                }
+                            }
+                        }
+                        else {
+                            warn "Could not find atom for target type";
+                        }
+                        if $did and $multi {
+                            ChangePropertyRequest.new(
+                                :mode(PropModeEnum::Replace),
+                                :window($req.requestor),
+                                :property($target),
+                                :type(AtomEnum::Atom),
+                                :data(buf32.new(@mod_targets))
+                            ).send($c);
+                            # TODO: check response
+                        }
+                        my $serp = 
+                            $did ?? self.receipt($req) !! self.refuse($req);
+                        my $x = False;
+                        $serp = await $serp;
+                        # Under normal operation we expect to receive a X::X11::NoReply
+                        # when waiting on the Cookie, as this is a void request.  Another
+                        # possibility is a single error.
+                        CATCH {
+                            when X::X11::NoReply { $x = $_; $_.resume }
+                            default { $x.message.note }
+                        };
                     }
                 }
                 else {
