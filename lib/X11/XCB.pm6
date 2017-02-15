@@ -365,15 +365,16 @@ our role Error[$error_code] is export(:internal) {
     }
 }
 
-our class Event::cstruct is repr("CStruct") {
-    has uint8 $.code;
-    has uint8 $.detail;
-    has uint16 $.sequence;
-}
-
 our role Event[$event_code] is export(:internal) {
 
     method cstruct {...}
+
+    # XXX Review: this was originally exported but rakudo changed something
+    my class Event::cstruct is repr("CStruct") {
+        has uint8 $.code;
+        has uint8 $.detail;
+        has uint16 $.sequence;
+    }
 
     #| Create a new X11 protocol event Perl6 object.
     #| A first parameter, if provided, is a Pointer to buffer data.

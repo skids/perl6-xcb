@@ -40,7 +40,7 @@ ok $voidpromise.sequence, "Sent a CreateWindow Request";
 my $broken = 0;
 my $voidwait = start {
     await($voidpromise);
-    CATCH { default { $broken = 1; .resume } } 
+    CATCH { default { $broken = 1; } }
 };
 
 my $qt = QueryTreeRequest.new(:window($wid.value));
@@ -97,7 +97,7 @@ $cookie = $qt.send($c);
 $c.flush;
 $broken = 0;
 $voidwait = start { my $res = await($cookie);
-  CATCH { default { $broken = 1; .resume } }
+  CATCH { default { $broken = 1; } }
 }
 # Send something else that will get a reply
 ListExtensionsRequest.new.send($c);
@@ -126,7 +126,7 @@ $cookie = $qt.send($c);
 $c.flush;
 $broken = 0;
 $voidwait = start { my $res = await($cookie);
-  CATCH { default { $broken = 1; .resume } }
+  CATCH { default { $broken = 1; } }
 }
 # Send something else that will get a reply
 ListExtensionsRequest.new.send($c);

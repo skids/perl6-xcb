@@ -43,7 +43,7 @@ my $voidpromise = $of.send($c);
 my $broken = 0;
 my $voidwait = start {
     await($voidpromise);
-    CATCH { default { $broken = 1; .resume } } 
+    CATCH { default { $broken = 1; } }
 };
 my $qf = QueryFontRequest.new(:font($fid.value));
 # Stress test with a large codepage

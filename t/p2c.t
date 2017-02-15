@@ -48,7 +48,8 @@ given String.new(:name<feefiefoofum>) {
 
   my @bufs = (|$_ for .bufs);
   is @bufs, (12,|"feefiefoofum".encode.values), "$what bufferizes correctly";
-  my $c = nativecast(.cstruct,Buf.new(@bufs));
+  my $b = Buf.new(@bufs);
+  my $c = nativecast(.cstruct,$b);
   is-deeply $c, .cstruct.new(:name_len(12)), "$what roundtrip to cstruct";
   my $left = 13;
   my $s = String.new(nativecast(Pointer,$c), :$left, :!free);
