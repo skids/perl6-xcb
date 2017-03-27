@@ -1172,7 +1172,10 @@ our class GC is export {
 #| X11 server timestamps.  These are 32-bit milliseconds values.
 #| As such, fancy wrapping rules apply.  There is also a special
 #| value CurrentTime(0) which needs to be handled specially.
-our class TimeStamp is Int is export(:internal) {
+our class TimeStamp is Int is repr('P6opaque') is export(:internal) {
+    use nqp;
+
+    method new($val) { nqp::box_i($val, TimeStamp) }
 
     #| Subtract $before from $after, according to X11 timestamp wrapping rules.
     #| The result will be positive if the X11 server will consider $after to
