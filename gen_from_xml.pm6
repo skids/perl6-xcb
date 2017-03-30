@@ -14,6 +14,8 @@ class param is rw {
     has $.c2p_code = |();
     has $.p2c_init = |();
     has $.p2c_code = |();
+    has $.fd_init = |();
+    has $.fd_send = |();
 }
 
 # Need a light-duty ordered, autovivifying typed Associative?  Sinch.
@@ -578,6 +580,12 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                 # This will activate when we do Request c-->perl6
                 $p<string>.c2p_code = "# TODOP6 length * 2 - odd_length";
             }
+        }
+        when "fd" {
+            my $name = $f.attribs<name>;
+            $p{$name}.p_attr = "has \$.$name is rw;";
+            $p{$name}.fd_init = '$.' ~ $name ~ ' = $fdb[$i]; $i++;';
+            $p{$name}.fd_send = 'xcb_send_fd($c.xcb, $.' ~ $name ~ ');';
         }
         when "pad" {
             if $f.attribs<align>:exists {
@@ -1734,13 +1742,15 @@ sub MakeReplies($mod) {
         my $cstruct = "";
         my @p6fields;
         my $p6args = "";
+        my $flagroles = "";
 
         my $clname = $req.attribs<name>;
         $clname = $oname ~ $clname
             if $clname eq any <
                 DestroyContext QueryVersion QueryExtension ListProperties
                 CreateCursor GetVersion QueryBestSize SelectInput Bell
-                Enable CreateContext ChangeSaveSet PutImage CreatePixmap
+                Enable CreateContext ChangeSaveSet GetImage PutImage
+                CreatePixmap
             > or $mod.cname eq "present"
               or ($clname ~~ /^Shm/) and $mod.cname eq "xv";
         my @doc;
@@ -1774,6 +1784,11 @@ sub MakeReplies($mod) {
 
             @doc.append(MakeClassDocs($rep, $clname ~ "Reply"));
 
+            if $rep.elements(:TAG<fd>).elems -> $nfds {
+                $flagroles ~= "does HasFD ";
+                $p<nfd>.p_attr = "has \$.nfd is rw = $nfds;";
+                $p<nfd>.c_attr = "has uint8 \$.nfd is rw = $nfds;";
+            }
             $p<pad0_0>.c_attr = 'has uint8 $.pad0_0;' unless $p.params[0]:exists;
             $p.params.splice(1,0,
                 param.new(:name<sequence>,:c_attr('has uint16 $.sequence is rw;')),
@@ -1811,6 +1826,7 @@ sub MakeReplies($mod) {
                 {@doc.join("\n")}
                 our class {$clname}Reply
                     does Reply[{$oname}OpcodeEnum::{$oname}Opcode({$req.attribs<opcode>})]
+                    {$flagroles}
                     is export(:DEFAULT, :replies) \{
 
                 { @cstructs[*-1] }
@@ -1832,6 +1848,11 @@ sub MakeReplies($mod) {
                         |@args;
                     }
 
+                    method fd_init(\$fds, :\$nfds) \{
+                        my \$fdb = nativecast(CArray[int], \$fds);
+                        my \$i = 0;
+                {$p.params».fd_init.join("\n").indent(8)}
+                    }
                 }
                 EO6C
 
@@ -1857,6 +1878,8 @@ sub MakeRequests($mod) {
         my @reqfields;
         my params $p .= new;
         my $found_list = 0;
+        my $flagroles = "";
+        my $fdsend = "";
 
         # We use the core API for this
         next if $req.attribs<name> eq "SetupAuthenticate";
@@ -1877,7 +1900,9 @@ sub MakeRequests($mod) {
                  }
             }
         }
-
+        if $req.elements(:TAG<fd>).elems {
+            $flagroles ~= "does HasFD ";
+        }
         if $mod.extension {
             $p.params.unshift(
                  param.new(:name<length>,:c_attr(
@@ -1932,13 +1957,27 @@ sub MakeRequests($mod) {
             if $clname eq any <
                 DestroyContext QueryVersion QueryExtension ListProperties
                 CreateCursor GetVersion QueryBestSize SelectInput Bell
-                Enable CreateContext ChangeSaveSet PutImage CreatePixmap
+                Enable CreateContext ChangeSaveSet GetImage PutImage
+                CreatePixmap
             > or $mod.cname eq "present"
               or ($clname ~~ /^Shm/) and $mod.cname eq "xv";
         my $isvoid = not $req.elements(:TAG<reply>);
 
         my @doc;
         @doc.append(MakeClassDocs($req, $clname ~ "Request"));
+
+        $fdsend = qq:to<EOFD> if +($p.params».fd_send);
+        # A higher level Connection object.
+        multi method send(\$c) \{
+            \$c.fd_lock.protect: \{
+        {$p.params».fd_send.join("\n").indent(8)}
+                \$.sequence = self.send(\$c.xcb);
+            }
+            my \$ret = Cookie.new(:\$.sequence, :reply_type(\$.reply));
+            \$c.cookies.send(\$ret.vow);
+            \$ret;
+        }
+        EOFD
 
         @p6classes.push(qq:to<EO6C>);
 {%GoodReqs{$isvoid ?? "Nil" !! "$oname $clname"} ?? "" !! "# TODOP6 Reply has TODOP6s"}
@@ -1949,6 +1988,7 @@ sub MakeRequests($mod) {
                                   ?? "xcb_extension_t"
                                   !! '&xcb_' ~ $mod.cname ~ "_id"},
                              {$isvoid.gist}]
+                $flagroles
                 is export(:DEFAULT, :requests) \{
 
                 my \$.reply{ $isvoid ?? ";" !! " = " ~ $clname ~ "Reply" ~ ";" }
@@ -1963,6 +2003,8 @@ sub MakeRequests($mod) {
             {$p.params».p2c_code.join("\n").indent(8)}
                     |@bufs;
                 }
+
+            {$fdsend.indent(4)}
 
             }
             EO6C

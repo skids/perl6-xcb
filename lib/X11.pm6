@@ -54,6 +54,9 @@ our class Connection is export {
     #| (May be used in future for runtime extension loading)
     has Lock $.error_lock = Lock.new();
     has Lock $.event_lock = Lock.new();
+    #| Lock used *only* by requests that send fds, to prevent
+    #| disordering between calls to xcb_send_fd and xcb_send_request
+    has Lock $.fd_lock = Lock.new();
 
     method flush { xcb_flush($!xcb) }
 
@@ -365,6 +368,7 @@ our class Connection is export {
                             my $c = $responses;
                             my $p = $_;
                             my $r2 = $r;
+                            # TODO can fds happen in multi-replies?
                             $sent .= then({
                                 $c.send: $p.promise.reply_type.new(
                                     $r2, :left(Int), :free
@@ -373,16 +377,30 @@ our class Connection is export {
                         }
                         else {
                             # We could just build a list but a Channel allows
-                            # multiple workers to respond.  Don't know if there
-                            # are any actual use cases for this, though.
+                            # multiple workers to respond.  Don't know if
+                            # there are any actual use cases for this, though.
                             $responses = Channel.new;
                             my $c = $responses;
                             my $p = $_;
                             my $r2 = $r;
+                            my $fds;
+                            # This actually just returns an
+                            # address where the fds are appended
+                            # after the packet data.  But the interior "API"
+                            # doesn't promise that, nor can we assume
+                            # this call ignores the state of $xcb.
+                            # So, we cannot do this in a thread
+                            # It implicitly promises no need to free it,
+                            # at least.
+                            my $rt = $p.promise.reply_type;
+                            if $rt.does(X11::XCB::HasFD) {
+                                $fds = xcb_get_reply_fds($xcb, $r,
+                                    nativesizeof($rt.cstruct));
+                            }
                             $sent = start {
                                 $p.keep($c);
-                                $c.send: $p.promise.reply_type.new(
-                                    $r2, :left(Int), :free
+                                $c.send: $rt.new(
+                                    $r2, :left(Int), :free, :$fds
                                 );
                             }
                         }

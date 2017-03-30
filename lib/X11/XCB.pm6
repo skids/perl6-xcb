@@ -184,6 +184,9 @@ sub xcb_get_setup (xcb_connection_t $c --> xcb_setup_t)
 sub xcb_get_file_descriptor (xcb_connection_t $c --> int32) 
     is native("xcb") is export { * }
 
+sub xcb_send_fd (xcb_connection_t $c, int32 $fd)
+    is native("xcb") is export { * }
+
 sub xcb_get_maximum_request_length (xcb_connection_t $c --> uint32)
     is native("xcb") is export { * }
 
@@ -200,6 +203,10 @@ sub xcb_wait_for_reply (xcb_connection_t $c, uint32 $request,
 sub xcb_poll_for_reply (xcb_connection_t $c, uint32 $request,
                         Pointer $reply is rw,
                         xcb_generic_error_t $e is rw --> int32)
+    is native("xcb") is export { * }
+
+sub xcb_get_reply_fds (xcb_connection_t $c, Pointer $reply, size_t $replylen
+                       --> Pointer)
     is native("xcb") is export { * }
 
 sub xcb_connection_has_error (xcb_connection_t $c --> int32)
@@ -518,6 +525,10 @@ our role Struct is export(:internal) {
 
 }
 
+# Composed into requests/replies that have ancillary channel FDs to transfer
+# Must be visible from inside lib/X11.pm6
+our role HasFD is export(:DEFAULT, :internal) { }
+
 our role Reply [$opcode] is export(:internal) {
 
     my $.opcode = $opcode;
@@ -561,7 +572,8 @@ our role Reply [$opcode] is export(:internal) {
     #| to point to a natively allocated buffer and the
     #| the Pointer will be freed.
     #| If no Pointer is provided, attributes may be initialized normally.
-    multi method new (Pointer $p, Int :$left! is rw, Bool :$free = True) {
+    multi method new (Pointer $p, Int :$left! is rw, Bool :$free = True,
+                      :$fds) {
         my $cs = nativecast(Pointer[$.cstruct], $p).deref;
         without $left {
             # We have to trust that the buffer is long enough to read
@@ -580,16 +592,17 @@ our role Reply [$opcode] is export(:internal) {
             %childinits{$k} := nqp::decont(v);
         }
         my $res = ::?CLASS.bless(|%childinits);
+        $res.fd_init($fds) with $fds;
         xcb_free $p if $free;
         $res;
     }
-    multi method new (Pointer $p, Int :$left!, Bool :$free = True) {
+    multi method new (Pointer $p, Int :$left!, Bool :$free = True, :$fds) {
         my Int $l = $left;
-        self.new($p, :left($l), :$free);
+        self.new($p, :left($l), :$free, :$fds);
     }
-    multi method new (Pointer $p, Bool :$free = True) {
+    multi method new (Pointer $p, Bool :$free = True, :$fds) {
         my $left = Int;
-        self.new($p, :$left, :$free);
+        self.new($p, :$left, :$free, :$fds);
     }
     multi method new (|c) {
         nextsame;
@@ -650,7 +663,9 @@ our role Request [$opcode, $ext, $isvoid] is export(:internal) {
 
         my $rq = self.xcb_protocol_request_t(:count(+@bufs));
 
-        xcb_send_request($c, 0, nativecast(xcb_iovec, $vecs), $rq);
+        my $flags = $?CLASS.reply.does(HasFD) ?? XCB_REQUEST_REPLY_FDS !! 0;
+
+        xcb_send_request($c, $flags, nativecast(xcb_iovec, $vecs), $rq);
     }
 
     #| Send this request to a connection.  If an xcb_connection_t
