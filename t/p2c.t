@@ -3,7 +3,7 @@ use lib <blib/lib lib>;
 
 use Test;
 
-plan 151;
+plan 274;
 
 use NativeCall;
 use X11::XCB;
@@ -113,20 +113,20 @@ given Printer.new(:name<myprinter>, :description<mineminemine!>) {
   ok $_.defined, "$what create perl instance";
 
   my @bufs = (|$_ for .bufs);
-  # XXX get this confirmation value endian-adj
-
 
   is @bufs, (uint32_bytes(9),|"myprinter".encode.values,
+             0,0,0, # alignment pad
              uint32_bytes(13),|"mineminemine!".encode.values,
+             0,0,0  # alignment pad
              ), "$what bufferizes correctly";
   my $b = Buf.new(@bufs);
   my $c = nativecast(.cstruct,$b);
   is-deeply $c, .cstruct.new(:nameLen(9)), "$what roundtrip to cstruct";
-  my $left = 4 + 9 + 4 + 13;
+  my $left = 4 + 9 + 3 + 4 + 13 + 3;
   my $s = Printer.new(nativecast(Pointer,$c), :$left, :!free);
   is $left, 0, "$what unpacking subtracts its length correctly";
   is-deeply $s.name, $_.name, "$what roundtrip to perl instance";
-  for ^(4 + 13 + 4 + 9) {
+  for ^(4 + 9 + 3 + 4 + 13 + 3) {
       $left = $_;
       throws-like 'Printer.new(nativecast(Pointer,$c), :$left, :!free)',
           Exception, message => /:i short\s+packet/, "$what dies on short buffer ($_)";
@@ -140,20 +140,19 @@ given Printer.new(:name(""), :description<mineminemine!>) {
   ok $_.defined, "$what create perl instance";
 
   my @bufs = (|$_ for .bufs);
-  # XXX get this confirmation value endian-adj
-
 
   is @bufs, (uint32_bytes(0),
              uint32_bytes(13),|"mineminemine!".encode.values,
+             0,0,0 # alignment pad
              ), "$what bufferizes correctly";
   my $b = Buf.new(@bufs);
   my $c = nativecast(.cstruct,$b);
   is-deeply $c, .cstruct.new(:nameLen(0)), "$what roundtrip to cstruct";
-  my $left = 4 + 4 + 13;
+  my $left = 4 + 4 + 13 + 3;
   my $s = Printer.new(nativecast(Pointer,$c), :$left, :!free);
   is $left, 0, "$what unpacking subtracts its length correctly";
   is-deeply $s.name, $_.name, "$what roundtrip to perl instance";
-  for ^(4 + 13 + 4) {
+  for ^(4 + 4 + 13 + 3) {
       $left = $_;
       throws-like 'Printer.new(nativecast(Pointer,$c), :$left, :!free)',
           Exception, message => /:i short\s+packet/, "$what dies on short buffer ($_)";
@@ -167,20 +166,19 @@ given Printer.new(:name<foo>, :description("")) {
   ok $_.defined, "$what create perl instance";
 
   my @bufs = (|$_ for .bufs);
-  # XXX get this confirmation value endian-adj
-
 
   is @bufs, (uint32_bytes(3), |"foo".encode.values,
+             0, # alignment pad
              uint32_bytes(0)
              ), "$what bufferizes correctly";
   my $b = Buf.new(@bufs);
   my $c = nativecast(.cstruct,$b);
   is-deeply $c, .cstruct.new(:nameLen(3)), "$what roundtrip to cstruct";
-  my $left = 4 + 3 + 4;
+  my $left = 4 + 3 + 1 + 4;
   my $s = Printer.new(nativecast(Pointer,$c), :$left, :!free);
   is $left, 0, "$what unpacking subtracts its length correctly";
   is-deeply $s.name, $_.name, "$what roundtrip to perl instance";
-  for ^(4 + 3 + 4) {
+  for ^(4 + 3 + 1 + 4) {
       $left = $_;
       throws-like 'Printer.new(nativecast(Pointer,$c), :$left, :!free)',
           Exception, message => /:i short\s+packet/, "$what dies on short buffer ($_)";
@@ -188,6 +186,84 @@ given Printer.new(:name<foo>, :description("")) {
   is-deeply .name, "foo", "$what .name is a Str";
   is-deeply .description, "", "$what .description is a Str";
 }
+
+given Printer.new(:name<myprint2>, :description<mineminemine!>) {
+  my $what = "interleaved length field with normal contents (1st aligned)";
+  ok $_.defined, "$what create perl instance";
+
+  my @bufs = (|$_ for .bufs);
+
+  is @bufs, (uint32_bytes(8),|"myprint2".encode.values,
+             uint32_bytes(13),|"mineminemine!".encode.values,
+             0,0,0  # alignment pad
+             ), "$what bufferizes correctly";
+  my $b = Buf.new(@bufs);
+  my $c = nativecast(.cstruct,$b);
+  is-deeply $c, .cstruct.new(:nameLen(8)), "$what roundtrip to cstruct";
+  my $left = 4 + 8 + 4 + 13 + 3;
+  my $s = Printer.new(nativecast(Pointer,$c), :$left, :!free);
+  is $left, 0, "$what unpacking subtracts its length correctly";
+  is-deeply $s.name, $_.name, "$what roundtrip to perl instance";
+  for ^(4 + 8 + 4 + 13 + 3) {
+      $left = $_;
+      throws-like 'Printer.new(nativecast(Pointer,$c), :$left, :!free)',
+          Exception, message => /:i short\s+packet/, "$what dies on short buffer ($_)";
+  }
+  is-deeply .name, "myprint2", "$what .name is a Str";
+  is-deeply .description, "mineminemine!", "$what .description is a Str";
+}
+
+given Printer.new(:name<myprinter>, :description<mineminemine>) {
+  my $what = "interleaved length field with normal contents (2nd aligned)";
+  ok $_.defined, "$what create perl instance";
+
+  my @bufs = (|$_ for .bufs);
+
+  is @bufs, (uint32_bytes(9),|"myprinter".encode.values,
+             0,0,0,  # alignment pad
+             uint32_bytes(12),|"mineminemine".encode.values,
+             ), "$what bufferizes correctly";
+  my $b = Buf.new(@bufs);
+  my $c = nativecast(.cstruct,$b);
+  is-deeply $c, .cstruct.new(:nameLen(9)), "$what roundtrip to cstruct";
+  my $left = 4 + 9 + 3 + 4 + 12;
+  my $s = Printer.new(nativecast(Pointer,$c), :$left, :!free);
+  is $left, 0, "$what unpacking subtracts its length correctly";
+  is-deeply $s.name, $_.name, "$what roundtrip to perl instance";
+  for ^(4 + 9 + 3 + 4 + 12) {
+      $left = $_;
+      throws-like 'Printer.new(nativecast(Pointer,$c), :$left, :!free)',
+          Exception, message => /:i short\s+packet/, "$what dies on short buffer ($_)";
+  }
+  is-deeply .name, "myprinter", "$what .name is a Str";
+  is-deeply .description, "mineminemine", "$what .description is a Str";
+}
+
+given Printer.new(:name<myprint2>, :description<mineminemine>) {
+  my $what = "interleaved length field with normal contents (both aligned)";
+  ok $_.defined, "$what create perl instance";
+
+  my @bufs = (|$_ for .bufs);
+
+  is @bufs, (uint32_bytes(8),|"myprint2".encode.values,
+             uint32_bytes(12),|"mineminemine".encode.values,
+             ), "$what bufferizes correctly";
+  my $b = Buf.new(@bufs);
+  my $c = nativecast(.cstruct,$b);
+  is-deeply $c, .cstruct.new(:nameLen(8)), "$what roundtrip to cstruct";
+  my $left = 4 + 8 + 4 + 12;
+  my $s = Printer.new(nativecast(Pointer,$c), :$left, :!free);
+  is $left, 0, "$what unpacking subtracts its length correctly";
+  is-deeply $s.name, $_.name, "$what roundtrip to perl instance";
+  for ^(4 + 8 + 4 + 12) {
+      $left = $_;
+      throws-like 'Printer.new(nativecast(Pointer,$c), :$left, :!free)',
+          Exception, message => /:i short\s+packet/, "$what dies on short buffer ($_)";
+  }
+  is-deeply .name, "myprint2", "$what .name is a Str";
+  is-deeply .description, "mineminemine", "$what .description is a Str";
+}
+
 
 given Printer.new(:name(""), :description("")) {
   my $what = "interleaved length field with both fields null";

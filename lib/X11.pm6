@@ -95,7 +95,7 @@ our class Connection is export {
         my @scrapheap;
         my Channel $res = Channel.new;
 
-        start { CATCH { $_.say }; react {
+        start { CATCH { $_.note }; react {
             whenever $scrap {
                 @scrapheap.push: $_;
                 LAST { @scrapheap = (); }
@@ -178,7 +178,7 @@ our class Connection is export {
             my $minor_opcode = $res.?minor_opcode // $req.?opcode // "TODO";
             my $bad_value = $res.?bad_value;
 
-            if not $bad_value.defined and (nativesizeof($res.cstruct) >= 8) {
+            if not $bad_value.defined and ($res.cstruct.wiresize >= 8) {
                 $bad_value = nativecast(stub, $err).bad_value
             };
             $bad_value //= "TODO";
@@ -195,7 +195,7 @@ our class Connection is export {
                                  );
         }
 
-        start { CATCH { $_.say };
+        start { CATCH { $_.note };
             my Channel $responses; # channel we are sending responses on
             my Promise $sent;      # thread handling cookie we are working on
             my Promise $evsent = start { }; # thread that handled last event
@@ -344,8 +344,8 @@ our class Connection is export {
                             my $c = $responses;
                             my $p = $_;
                             $sent.then({
-                                $ev = error_to_exception($ev, 
-                                                     $p.promise.reply_type);
+                                $ev = error_to_exception($ev,
+                                                         $p.promise.reply_type);
                                 $ev === Any ?? $c.close !! $c.fail($ev);
                             })
                         }
@@ -395,13 +395,14 @@ our class Connection is export {
                             my $rt = $p.promise.reply_type;
                             if $rt.does(X11::XCB::HasFD) {
                                 $fds = xcb_get_reply_fds($xcb, $r,
-                                    nativesizeof($rt.cstruct));
+                                    $rt.cstruct.wiresize);
                             }
                             $sent = start {
                                 $p.keep($c);
                                 $c.send: $rt.new(
                                     $r2, :left(Int), :free, :$fds
                                 );
+                                CATCH { $_.note }
                             }
                         }
                     }
@@ -1446,7 +1447,7 @@ our class Selection is export {
                                         $did++;
                                     }
                                     else {
-                                        CATCH { $_.warn }
+                                        CATCH { $_.note }
                                         given $.content {
                                             when Content {
                                                 my $type, my $data;

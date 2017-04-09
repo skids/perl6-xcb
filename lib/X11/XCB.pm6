@@ -12,6 +12,34 @@ unit module X11::XCB;
 
 use NativeCall;
 
+#| Most X11 requests take care to pad out the static part
+#| of the structure to match what C will do.  A few miss
+#| the trailing padding, requiring fixups.  These are a
+#| few utility methods to help calculate that fixup.
+our role cpacking is export(:internal) {
+    #| Size of a struct without trailing padding which C compilers add
+    method wiresize {
+        # It would be nice to get this to constant-fold... somehow...
+        state $ = [+] |(wiresize($_.type) for ::?CLASS.^attributes)
+    }
+    #| Alignment up to which compilers add trailing padding to a C struct
+    method calign {
+        # It would be nice to get this to constant-fold... somehow...
+        state $ = max(|(calign($_.type) for ::?CLASS.^attributes))
+    }
+}
+
+#| subroutine form of cpacking.wiresize which also handles native types
+our sub wiresize ($obj) is export(:internal) {
+    $obj.does(cpacking) ?? $obj.wiresize !! nativesizeof($obj);
+}
+
+#| subroutine form of cpacking.calign which also handles native types
+our sub calign ($obj) is export(:internal) {
+    $obj.does(cpacking) ?? $obj.calign !! nativesizeof($obj);
+}
+
+#| Returns either an empty slip, or Buf containing $bytes 0 bytes
 sub padbuf(Int $bytes) is export(:internal) {
     given $bytes {
         when 0 { |() };
@@ -301,7 +329,7 @@ our role Error[$error_code] is export(:internal) {
     #| If no Pointer is provided, attributes may be initialized normally.
     multi method new (Pointer $p, Int :$left! is rw, Bool :$free = True) {
         my $cs = nativecast(self.cstruct, $p);
-        $left -= nativesizeof(self.cstruct);
+        $left -= self.cstruct.wiresize;
         fail("Short packet.") unless $left >= 0;
         my $res = self.bless(|$cs.Hash);
         xcb_free $p if $free;
@@ -322,7 +350,7 @@ our role Error[$error_code] is export(:internal) {
     method Buf {
         # XXX This is not technically safe.  We want GC memory,
         # and aliases into it, but GC memory can move anytime.
-        my $len = nativesizeof($.cstruct);
+        my $len = $.cstruct.wiresize;
         my $res = Buf.new(0 xx $len);
         my $c := nativecast($.cstruct, $res);
         $c.nativize(self);
@@ -397,7 +425,7 @@ our role Event[$event_code] is export(:internal) {
     #| If no Pointer is provided, attributes may be initialized normally.
     multi method new (Pointer $p, Int :$left! is rw, Bool :$free = True) {
         my $cs = nativecast(self.cstruct, $p);
-        $left -= nativesizeof(self.cstruct);
+        $left -= self.cstruct.wiresize;
         fail("Short packet.") unless $left >= 0;
         my $res = self.bless(|$cs.Hash);
         xcb_free $p if $free;
@@ -418,7 +446,7 @@ our role Event[$event_code] is export(:internal) {
     method Buf {
         # XXX This is not technically safe.  We want GC memory,
         # and aliases into it, but GC memory can move anytime.
-        my $len = nativesizeof($.cstruct);
+        my $len = $.cstruct.wiresize;
         my $res = Buf.new(0 xx $len);
         my $c := nativecast($.cstruct, $res);
         $c.nativize(self);
@@ -482,13 +510,14 @@ our role Struct is export(:internal) {
     #| the Pointer will be freed.
     #| If no Pointer is provided, attributes may be initialized normally.
     multi method new (Pointer $p, Int :$left! is rw, Bool :$free = True) {
+        my $oleft = $left;
         my $cs = nativecast(Pointer[$.cstruct], $p).deref;
-        $left -= nativesizeof($.cstruct);
+        $left -= $.cstruct.wiresize;
 	fail("Short packet.") unless $left >= 0;
         my %childinits;
         for (|$cs.Hash.kv, |self.child_structs(Pointer[uint8].new(
                                    nativecast(Pointer[uint8], $p)
-                                   + nativesizeof($.cstruct)
+                                   + $.cstruct.wiresize
                                ), $cs, :$left)) -> $k, \v {
             use nqp;
             # XXX graceful way to decont without NQP or assuming listiness?
@@ -496,6 +525,9 @@ our role Struct is export(:internal) {
         }
         my $res = ::?CLASS.bless(|%childinits);
         xcb_free $p if $free;
+        if ($oleft - $left) % $.cstruct.calign -> $alignpad {
+            $left -= $.cstruct.calign - $alignpad
+        }
         $res;
     }
     multi method new (Pointer $p, Int :$left!, Bool :$free = True) {
@@ -509,11 +541,10 @@ our role Struct is export(:internal) {
     multi method new (|c) {
         nextsame;
     }
-
     method Buf {
         # XXX This is not technically safe.  We want GC memory,
         # and aliases into it, but GC memory can move anytime.
-        my $len = nativesizeof($.cstruct);
+        my $len = $.cstruct.wiresize;
         my $res = Buf.new(0 xx $len);
         my $c := nativecast($.cstruct, $res);
         $c.nativize(self);
@@ -540,7 +571,7 @@ our role Reply [$opcode] is export(:internal) {
     method Buf {
         # XXX This is not technically safe.  We want GC memory,
         # and aliases into it, but GC memory can move anytime.
-        my $len = nativesizeof($.cstruct);
+        my $len = $.cstruct.wiresize;
         my $res = Buf.new(0 xx $len);
         my $c := nativecast($.cstruct, $res);
         $c.nativize(self);
@@ -580,12 +611,12 @@ our role Reply [$opcode] is export(:internal) {
             # the length field and that the length field is accurate
             $left = 32 + $cs.length * 4;
         }
-        $left -= nativesizeof($.cstruct);
+        $left -= $.cstruct.wiresize;
 	fail("Short packet.") unless $left >= 0;
         my %childinits;
         for (|$cs.Hash.kv, |self.child_structs(Pointer[uint8].new(
                                    nativecast(Pointer[uint8], $p)
-                                   + nativesizeof($.cstruct)
+                                   + $.cstruct.wiresize
                                ), $cs, :$left)) -> $k, \v {
             use nqp;
             # XXX graceful way to decont without NQP or assuming listiness?
@@ -628,7 +659,7 @@ our role Request [$opcode, $ext, $isvoid] is export(:internal) {
     method Buf {
         # XXX This is not technically safe.  We want GC memory,
         # and aliases into it, but GC memory can move anytime.
-        my $len = nativesizeof($.cstruct);
+        my $len = $.cstruct.wiresize;
         my $res = Buf.new(0 xx $len);
         my $c := nativecast($.cstruct, $res);
         $c.nativize(self);
