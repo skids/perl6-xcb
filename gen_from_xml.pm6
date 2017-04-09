@@ -108,6 +108,33 @@ sub MAIN (:$xmldir? is copy) {
     Output($_) for @mods;
 }
 
+sub makemeth_child_bufs(params $p, :$indent = 0) {
+
+    my $p2c_code = $p.params».p2c_code;
+    with $p2c_code.first(*.chars) { qq:to<EOCB>.indent($indent) }
+        method child_bufs \{
+            my @bufs;
+        {$p2c_code.join("\n").indent($indent + 4)}
+            |@bufs;
+        }
+        EOCB
+    else { "" }
+}
+
+sub makemeth_child_structs(params $p, :$indent = 0) {
+
+    my $c2p_code = $p.params».c2p_code;
+    with $c2p_code.first(*.chars) { qq:to<EOCS>.indent($indent) }
+        method child_structs(Pointer \$p, \$pstruct, Real :\$left! is rw) \{
+            my @args;
+            my \$oleft = \$left;
+        {$c2p_code.join("\n").indent($indent + 4)}
+            |@args;
+        }
+        EOCS
+    else { "" }
+}
+
 sub MakeMod ($xml) {
     my $xmltree = from-xml-file($xml.Str);
     unless $xmltree.root.name eq "xcb" {
@@ -1641,19 +1668,9 @@ sub MakeErrors2($mod) {
                 has \$.sequence;
             {({ |(.p_doc, .p_attr) } for $p.params).join("\n").indent(4)}
 
-                method child_bufs \{
-                    my @bufs;
-            {$p.params».p2c_code.join("\n").indent(8)}
-                    |@bufs;
-                }
+            { makemeth_child_bufs($p, :indent(4)) }
 
-                method child_structs(Pointer \$p, \$pstruct,
-                                     Real :\$left! is rw) \{
-                    my @args;
-                    my \$oleft = \$left;
-            {$p.params».c2p_code.join("\n").indent(8)}
-                    |@args;
-                }
+            { makemeth_child_structs($p, :indent(4)) }
 
             $mcode
 
@@ -1778,19 +1795,9 @@ sub MakeEvents2($mod) {
                 has \$.sequence is rw;
             {({ |(.p_doc, .p_attr) } for $p.params).join("\n").indent(4)}
 
-                method child_bufs \{
-                    my @bufs;
-            {$p.params».p2c_code.join("\n").indent(8)}
-                    |@bufs;
-                }
+            { makemeth_child_bufs($p, :indent(4)) }
 
-                method child_structs(Pointer \$p, \$pstruct,
-                                     Real :\$left! is rw) \{
-                    my @args;
-                    my \$oleft = \$left;
-            {$p.params».c2p_code.join("\n").indent(8)}
-                    |@args;
-                }
+            { makemeth_child_structs($p, :indent(4)) }
 
             }
             EO6C
@@ -1888,19 +1895,9 @@ sub MakeCases($bitswitch) {
 
             {({ |(.p_doc, .p_attr) } for $p.params).join("\n").indent(4)}
 
-                method child_bufs \{
-                    my @bufs;
-            {$p.params».p2c_code.join("\n").indent(8)}
-                    |@bufs;
-                }
+            { makemeth_child_bufs($p, :indent(4)) }
 
-                method child_structs(Pointer \$p, \$pstruct,
-                                     Real :\$left! is rw) \{
-                    my @args;
-                    my \$oleft = \$left;
-            {$p.params».c2p_code.join("\n").indent(8)}
-                    |@args;
-                }
+            { makemeth_child_structs($p, :indent(4)) }
 
             $optnew
 
@@ -2018,19 +2015,9 @@ sub MakeStructs($mod) {
 
             {({ |(.p_doc, .p_attr) } for $p.params).join("\n").indent(4)}
 
-                method child_bufs \{
-                    my @bufs;
-            {$p.params».p2c_code.join("\n").indent(8)}
-                    |@bufs;
-                }
+            { makemeth_child_bufs($p, :indent(4)) }
 
-                method child_structs(Pointer \$p, \$pstruct,
-                                     Real :\$left! is rw) \{
-                    my @args;
-                    my \$oleft = \$left;
-            {$p.params».c2p_code.join("\n").indent(8)}
-                    |@args;
-                }
+            { makemeth_child_structs($p, :indent(4)) }
 
             $optnew
 
@@ -2039,7 +2026,7 @@ sub MakeStructs($mod) {
 
             if $clname eq 'CommonBehavior' {
                 @cstructs.push(@cstructs[*-1]);
-                @p6classes.push(q:to<EOBH>) 
+                @p6classes.push(q:to<EOBH>)
                 our class Behavior is export(:DEFAULT, :structs) {
                     constant cstruct = CommonBehavior::cstruct;
 
@@ -2197,19 +2184,9 @@ sub MakeReplies($mod) {
                     has \$.sequence is rw;
                 {({ |(.p_doc, .p_attr) } for $p.params).join("\n").indent(4)}
 
-                    method child_bufs \{
-                        my @bufs;
-                {$p.params».p2c_code.join("\n").indent(8)}
-                        |@bufs;
-                    }
+                { makemeth_child_bufs($p, :indent(4)) }
 
-                    method child_structs(Pointer \$p, \$pstruct,
-                                         Real :\$left! is rw) \{
-                        my @args;
-                        my \$oleft = \$left;
-                {$p.params».c2p_code.join("\n").indent(8)}
-                        |@args;
-                    }
+                { makemeth_child_structs($p, :indent(4)) }
 
                     method fd_init(\$fds, :\$nfds) \{
                         my \$fdb = nativecast(CArray[int], \$fds);
@@ -2366,19 +2343,9 @@ sub MakeRequests($mod) {
                 has \$.sequence is rw;
             {({ |(.p_doc, .p_attr) } for $p.params).join("\n").indent(4)}
 
-                method child_bufs \{
-                    my @bufs;
-            {$p.params».p2c_code.join("\n").indent(8)}
-                    |@bufs;
-                }
+            { makemeth_child_bufs($p, :indent(8)) }
 
-                method child_structs(Pointer \$p, \$pstruct,
-                                     Real :\$left! is rw) \{
-                    my @args;
-                    my \$oleft = \$left;
-            {$p.params».c2p_code.join("\n").indent(8)}
-                    |@args;
-                }
+            { makemeth_child_structs($p, :indent(8)) }
 
             {$fdsend.indent(4)}
 

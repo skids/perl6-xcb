@@ -347,6 +347,9 @@ our role Error[$error_code] is export(:internal) {
         nextsame;
     }
 
+    method child_bufs { |() }
+    method child_structs(Pointer $p, $pstruct, Real :$left! is rw) { |() }
+
     method Buf {
         # XXX This is not technically safe.  We want GC memory,
         # and aliases into it, but GC memory can move anytime.
@@ -443,6 +446,9 @@ our role Event[$event_code] is export(:internal) {
         nextsame;
     }
 
+    method child_bufs { |() }
+    method child_structs(Pointer $p, $pstruct, Real :$left! is rw) { |() }
+
     method Buf {
         # XXX This is not technically safe.  We want GC memory,
         # and aliases into it, but GC memory can move anytime.
@@ -495,8 +501,6 @@ our role Struct is export(:internal) {
 
     method cstruct {...}
 
-    method child_structs(Pointer $p, $pstruct, Int :$left! is rw) {...}
-
     #| Create a new X11 protocol substructure Perl6 object.
     #| A first parameter, if provided, is a Pointer to buffer data.
     #| If provided, :left designates the length of data (in bytes) available
@@ -541,6 +545,10 @@ our role Struct is export(:internal) {
     multi method new (|c) {
         nextsame;
     }
+
+    method child_bufs { |() }
+    method child_structs(Pointer $p, $pstruct, Real :$left! is rw) { |() }
+
     method Buf {
         # XXX This is not technically safe.  We want GC memory,
         # and aliases into it, but GC memory can move anytime.
@@ -567,6 +575,7 @@ our role Reply [$opcode] is export(:internal) {
     method cstruct {...}
 
     method child_bufs { |() }
+    method child_structs(Pointer $p, $pstruct, Real :$left! is rw) { |() }
 
     method Buf {
         # XXX This is not technically safe.  We want GC memory,
@@ -655,6 +664,7 @@ our role Request [$opcode, $ext, $isvoid] is export(:internal) {
     method cstruct {...}
 
     method child_bufs { |() }
+    method child_structs(Pointer $p, $pstruct, Real :$left! is rw) { |() }
 
     method Buf {
         # XXX This is not technically safe.  We want GC memory,
