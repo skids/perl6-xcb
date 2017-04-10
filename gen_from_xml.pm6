@@ -24,12 +24,12 @@ class param is rw {
 class params does Associative {
     has param @.params;
     method AT-KEY (Str $key) is rw {
-my $res = @.params.first(*.name eq $key);
-unless $res.defined {
-    @.params.push(param.new(:name($key)));
-    $res = @.params[*-1];
-}
-$res;
+        my $res = @.params.first(*.name eq $key);
+        unless $res.defined {
+            @.params.push(param.new(:name($key)));
+            $res = @.params[*-1];
+        }
+        $res;
     }
     method EXISTS-KEY ($key) is rw {
         so @.params.first(*.name eq $key);
@@ -407,7 +407,7 @@ sub MakeEnums ($mod) {
             }
 
             class {$rname}::cstruct is repr("CUnion") \{...}
-                
+
             EOOC
         }
         else {
@@ -662,7 +662,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                 $padnum++;
                 $align = $f.attribs<align> if $f.attribs<align>:exists;
                 $align //= (0, |(.c_offset for $p.params)).rotor(2 => -1).map(-> ($a, $b) {$b - $a}).max;
-                
+
                 while ($offset % $align) {
                     given "pad{$padnum}_{$align - $_ - 1}" {
                        $p{$_}.c_offset = $offset + 1;
@@ -1310,7 +1310,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                     if \$b < {$name}___maxof \{
                         @bufs.push: Buf[uint32].new(
                             (loop (\$b = 1; \$b < {$name}___maxof; \$b +<= 1) \{
-                                if \%.$pname\{{$renum.value}Enum\::{$renum.value}(\$b)}:exists \{                            
+                                if \%.$pname\{{$renum.value}Enum\::{$renum.value}(\$b)}:exists \{
                                     (+\%.$pname\{{$renum.value}Enum\::{$renum.value}(\$b)}) +& 0xffffffff;
                                 }
                              }))
@@ -1814,7 +1814,7 @@ sub MakeCases($bitswitch) {
     my @p6classes;
     my @casemap;
     my $pname = $bitswitch.xml.attribs<name>;
-    
+
     for $bitswitch.xml.elements(:TAG<bitcase>) -> $bitcase {
         my $cstruct = "";
         my @p6fields;
@@ -2196,7 +2196,7 @@ sub MakeReplies($mod) {
                 }
                 EO6C
 
-%GoodReqs{"$oname $clname"}++ unless @p6classes[*-1] ~~ /TODOP6/;
+            %GoodReqs{"$oname $clname"}++ unless @p6classes[*-1] ~~ /TODOP6/;
 
         });
     }
@@ -2323,7 +2323,7 @@ sub MakeRequests($mod) {
         EOFD
 
         @p6classes.push(qq:to<EO6C>);
-{%GoodReqs{$isvoid ?? "Nil" !! "$oname $clname"} ?? "" !! "# TODOP6 Reply has TODOP6s"}
+            {%GoodReqs{$isvoid ?? "Nil" !! "$oname $clname"} ?? "" !! "# TODOP6 Reply has TODOP6s"}
             {@doc.join("\n")}
             our class {$clname}Request
                 does Request[{$oname}OpcodeEnum::{$oname}Opcode({$req.attribs<opcode>}),
