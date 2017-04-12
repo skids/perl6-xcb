@@ -204,6 +204,9 @@ sub makemeth_child_structs(params $p, :$indent = 0) {
     else { "" }
 }
 
+# Special quirks and workarounds
+my %quirks = "ClientMessageData" => &makeClientMessageData;
+
 sub MakeMod ($xml) {
     my $outname;
     my $cname;
@@ -315,6 +318,33 @@ sub NCtype ($t is copy) {
                long longlong num32 num64
                Str CArray[int32] Pointer[void]
                bool size_t>) ?? $t !! "TODOP6";
+}
+
+# Sometimes we want to have the type object here in the generator
+# rather than a string.
+our %nctypemap_eval;
+sub NCevaltype ($t) {
+    use MONKEY-SEE-NO-EVAL;
+
+    unless %nctypemap_eval{$t}:exists {
+        my $typestr = NCtype($t);
+        %nctypemap_eval{$t} = EVAL $typestr;
+    }
+    %nctypemap_eval{$t}
+}
+
+# Also, cache nativesizeofs
+our %nctypemap_size;
+sub NCsizetype ($t) {
+    use NativeCall;
+    unless %nctypemap_size{$t}:exists {
+        my $typesize = nativesizeof(NCevaltype($t));
+        %nctypemap_size{$t} = $typesize;
+    }
+    %nctypemap_size{$t}
+}
+sub NCmasktype ($t) {
+    (1 +< NCsizetype($t)) - 1
 }
 
 sub MakeTypeDefs ($mod) {
@@ -563,52 +593,16 @@ sub build_equation($f) {
 my %cstructs = "sync:INT64" => "Counter64", "Behavior" => "Behavior", "NotifyData" => "NotifyData";
 sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is rw") {
     given ($f.isa(XML::Comment) ?? "pad" !! $f.name) {
+        my $name = $f.can("attribs") ?? $f.attribs<name> !! $_;
+        my $type = $f.can("attribs") ?? $f.attribs<type> !! $_;
         when "field"|"exprfield" {
             use NativeCall;
 
-            if $f.attribs<type> eq "ClientMessageData" {
-                $p<data>.c_attr = q:to<EOCM>;
-                    has uint32 $.cmd___pad0;
-                    has uint32 $.cmd___pad1;
-                    has uint32 $.cmd___pad2;
-                    has uint32 $.cmd___pad3;
-                    has uint32 $.cmd___pad4;
-                    EOCM
-                $p<format>.p_attr = '# Use depth of $.data for $.format';
-                $p<format>.p2c_init = '$!format = nativesizeof($p6.data.of) +< 3;';
-                $p<format>.c2p_arg = |();
-                $p<data>.p_attr = 'has $.data;';
-                $p<data>.c2p_arg = q:to<EOPC>;
-                    :data(
-                        do given self.format {
-                            when 8 {
-                                Buf[uint8].new(
-                                    nativecast(CArray[uint8], self)[12..^32];
-                                )
-                            }
-                            when 16 {
-                                Buf[uint16].new(
-                                    nativecast(CArray[uint16], self)[6..^16];
-                                )
-                            }
-                            when 32 {
-                                Buf[uint32].new(
-                                    nativecast(CArray[uint32], self)[3..^8];
-                                )
-                            }
-
-                        }
-                    )
-                    EOPC
-                $p<data>.p2c_init =
-                    '($!cmd___pad0, $!cmd___pad1, $!cmd___pad2, ' ~
-                    '$!cmd___pad3, $!cmd___pad4)'
-                    ~ "\n" ~
-                    '    = nativecast(CArray[uint32],$p6.data)[^5] ';
-                succeed;
+            # Deal with special mutant cases
+            if %quirks{$type}:exists {
+                %quirks{$type}($p, :$padnum);
+                succeed
             }
-            my $name = $f.attribs<name>;
-            my $type = $f.attribs<type>;
             my $has = "has";
             my $offset = +$p.params ?? $p.params[*-1].c_offset !! 0;
             my $align = (0, |(.c_offset for $p.params)).rotor(2 => -1).map(-> ($a, $b) {$b - $a}).max;
@@ -690,11 +684,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
             }
 
             else {
-                { use MONKEY-SEE-NO-EVAL;
-                    # TODO make a NCType that returns an actual type
-                    # so we do not have to EVAL this
-                    $offset += EVAL "nativesizeof({NCtype($type)})";
-                }
+                $offset += NCsizetype($type);
 
                 $p{$name}.c_attr ~= qq:to<EOCA>;
 
@@ -720,13 +710,11 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                 $p<odd_length>.p2c_init = '$!odd_length = +@.string +& 1;';
                 $p<odd_length>.p_attr = |();
                 $p<odd_length>.c2p_arg = |();
-                # This will activate when we do Request c-->perl6
                 $p<string>.c2p_code = "# TODOP6 length * 2 - odd_length";
             }
             $p{$name}.c_offset = $offset;
         }
         when "fd" {
-            my $name = $f.attribs<name>;
             $p{$name}.p_attr = "has \$.$name is rw;";
             $p{$name}.fd_init = '$.' ~ $name ~ ' = $fdb[$i]; $i++;';
             $p{$name}.fd_send = 'xcb_send_fd($c.xcb, $.' ~ $name ~ ');';
@@ -780,13 +768,12 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
             }).join(" ");
         }
         when "list" {
-            if $f.attribs<name> ~~ /^alignment_pad/ {
+            if $name ~~ /^alignment_pad/ {
                 # Not really a list.  A pad.
                 $found_list++;
                 my $align = $f.elements(:RECURSE, :TAG<unop>, :op<~>).first({$_.elements(:FIRST, :TAG<value>)[0].contents ~~ /^\s*\d+\s*/});
                 $align = +$align.elements(:FIRST, :TAG<value>)[0].contents + 1;
                 # Map String directly to Perl6 Str
-                my $name = $f.attribs<name>;
                 $p{$name}.c_offset = (+$p.params ?? $p.params[*-1].c_offset !! 0) + $align;
                 $p{$name}.c_attr = "# Dynamic layout: alignment padding";
                 $p{$name}.p_attr = "# Padding for alignment here in CStruct";
@@ -819,9 +806,6 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                     # This will need to be adjusted for widths.
                     $eq = '($pstruct.length * 4 - $oleft + $left)';
                 }
-
-                my $name = $f.attribs<name>;
-                my $type = $f.attribs<type>;
 
                 if $type eq "void" and $eq ~~ /pstruct\.(\w+)\s\*<-alpha>*\$pstruct.format.*div\s8/ {
                     # Typical Properties handling, map to typed array
@@ -966,7 +950,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                     $p{$TODOP6}.p_attr = "# $TODOP6 NYI $_";
                 }
             }
-            elsif $f.elements(:TAG<value>) and $f.attribs<type> eq "char" and $f.attribs<name> eq "event"  {
+            elsif $f.elements(:TAG<value>) and $type eq "char" and $name eq "event"  {
                 # Special case SendEvent
                 $p<event>.p_attr = q:to<EOPA>;
                     has $.event;
@@ -997,8 +981,6 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
             }
             elsif $f.elements(:TAG<value>) -> [ $val ] {
                 my $frval = $val.contents.Str.Int;
-                my $name = $f.attribs<name>;
-                my $type = $f.attribs<type>;
                 my $nct = NCtype($type);
                 unless $found_list {
                     # We know where the structure is exactly and it is
@@ -1071,10 +1053,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                 if $f.attribs<type> eq "STRING8" or
                     $f.attribs<type> eq "char"
                     # this is tacky -- for ImageText8
-                    and !($f.attribs<name> eq "string" and $p<x>:exists) {
-
-                    my $name = $f.attribs<name>;
-                    my $type = $f.attribs<type>;
+                    and !($name eq "string" and $p<x>:exists) {
 
                     # Go back and remove the _len field from perl6 attributes
                     $p{$frname}.p_attr = "# $frname not needed in P6 object";
@@ -1139,10 +1118,8 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                             \$left -= \$pstruct\.$frname;
                             EOP2
                 }
-               elsif $f.attribs<type> eq "CHAR2B" or $f.attribs<type> eq "char" and $f.attribs<name> eq "string" and $p<x>:exists {
+               elsif $f.attribs<type> eq "CHAR2B" or $type eq "char" and $name eq "string" and $p<x>:exists {
                     # Font stuff.  Use a buffer not a string due to encoding
-                    my $name = $f.attribs<name>;
-                    my $type = $f.attribs<type>;
 
                     # Go back and remove the _len field from perl6 attributes
                     $p{$frname}.p_attr = "# $frname not needed in P6 object";
@@ -1213,8 +1190,6 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                     int8 int16 int32 int64 uint8 uint16 uint32 uint64 long
                     longlong bool size_t num32 num64
                 > {
-                    my $name = $f.attribs<name>;
-                    my $type = $f.attribs<type>;
                     my $nct = NCtype($type);
 
                     # Go back and remove the _len field from perl6 attributes
@@ -1271,10 +1246,8 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                             });
                         EOP2
                 }
-                elsif $f.attribs<type> eq "STR" {
-                    # Map String directly to Perl6 Str
-                    my $name = $f.attribs<name>;
-                    my $type = $f.attribs<type>;
+                elsif $type eq "STR" { # Map "String" directly to Perl6 Str
+
                     # Go back and remove the _len field from perl6 attributes
                     $p{$frname}.p_attr = "# $frname not needed in P6 object";
 
@@ -1302,8 +1275,6 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                     EOPC
                 }
                 elsif %cstructs{$f.attribs<type>} -> $pt {
-                    my $name = $f.attribs<name>;
-                    my $type = $f.attribs<type>;
                     # Go back and remove the _len field from perl6 attributes
                     $p{$frname}.p_attr = "# $frname not needed in P6 object";
 
@@ -1409,7 +1380,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
         }
         when "switch" {
             $found_list = 1;
-            my $pname = $f.attribs<name>;
+            my $pname = $name;
             my @names = ($f.elements(:FIRST).name eq "fieldref" ?? $f.elements(:FIRST).contents.Str
                 !! (.contents.Str for $f.elements(:FIRST).elements(:TAG<fieldref>, :RECURSE)));
             my $parent = $f.parent;
@@ -2520,4 +2491,44 @@ sub Output ($mod) {
     $out.print("\n}\n");
     say($mod.p6classes.grep({$_ ~~ /TODOP6/}).join);
     $out.close;
+}
+
+sub makeClientMessageData($p, *%_) {
+    $p<data>.c_attr = q:to<EOCM>;
+        has uint32 $.cmd___pad0;
+        has uint32 $.cmd___pad1;
+        has uint32 $.cmd___pad2;
+        has uint32 $.cmd___pad3;
+        has uint32 $.cmd___pad4;
+        EOCM
+    $p<format>.p_attr = '# Use depth of $.data for $.format';
+    $p<format>.p2c_init = '$!format = nativesizeof($p6.data.of) +< 3;';
+    $p<format>.c2p_arg = |();
+    $p<data>.p_attr = 'has $.data;';
+    $p<data>.c2p_arg = q:to<EOPC>;
+        :data(
+            do given self.format {
+                when 8 {
+                    Buf[uint8].new(
+                        nativecast(CArray[uint8], self)[12..^32];
+                    )
+                }
+                when 16 {
+                    Buf[uint16].new(
+                        nativecast(CArray[uint16], self)[6..^16];
+                    )
+                }
+                when 32 {
+                    Buf[uint32].new(
+                        nativecast(CArray[uint32], self)[3..^8];
+                    )
+                }
+            }
+        )
+        EOPC
+    $p<data>.p2c_init =
+        '($!cmd___pad0, $!cmd___pad1, $!cmd___pad2, ' ~
+        '$!cmd___pad3, $!cmd___pad4)'
+        ~ "\n" ~
+        '    = nativecast(CArray[uint32],$p6.data)[^5] ';
 }
