@@ -4,6 +4,9 @@ use XML;
 # Places we are likely to find XCB-XML files
 my @xmlpaths = "/usr/share/xcb";
 
+my $generator_version = v0.alpha; # NOTE: I only update this on git tags
+my $append_version; # Gets appended to extension version
+
 class param is rw {
     has $.name;
     has $.c_attr = |();
@@ -74,20 +77,87 @@ class bitswitch {
 # Keep track of XML coverage during devel.
 my $TODOP6 = "TODOP6_0";
 
-sub MAIN (:$xmldir? is copy) {
+sub guess_xcbxml_version (IO::Path $dir, @xmlfiles) {
+    my $res;
+    my $news = $dir.child("NEWS");
+    if $news.e {
+        note "Taking release version from $news";
+        my $n = $news.IO.lines.first(/Release\s+\d/);
+        $res = Version.new($/[0])
+            if ($n ~~ /Release\s+(\d+\.\d+)\s/)
+    }
+    if $dir.child(".gitattributes").e or $dir.child(".git").e {
+        note "Your XCB XML is in a git repo.  Refining version using git.";
+        my $headsha =
+            (run "git", "rev-parse", "HEAD", :cwd($dir), :out).out.slurp-rest;
+        my $n;
+        without $res {
+            my $log = (run "git", "log", "-n", "1000", :cwd(~$dir), :out);
+            $n = $log.out.lines.first: /Release\s+xcb\-proto\s+\d/;
+            $log.sink;
+            $res = Version.new($/[0])
+                if ($n ~~ /Release\s+xcb\-proto\s+(\d+\.\d+)/);
+        }
+        with $res {
+            my $tagsha = (
+                    run "git", "rev-list", "-n", 1, $res, :cwd($dir), :out
+                ).out.slurp-rest;
+	    if $headsha ne $tagsha {
+                # We are ahead of release, treat as a pre-release for next one
+                $res = Version.new(($res.parts[0..*-2], $res.parts[*-1] + 1,
+                                    "prior").join("."));
+            }
+            else {
+                $res = Version.new(($res.parts[0..^*], 0).join("."));
+            }
+        }
+    }
+    without $res {
+        # No NEWS or git.  Assume it is a release.  Use a heuristic.
+        note "Warning: Wild guess at xcbxml version.  Better to provide on CLI.";
+        my $xproto = @xmlfiles[0].slurp;
+        $res = v1.10.0 if $xproto ~~ /GeGeneric/;
+        $res = v1.12.0 if $res.defined and $xproto ~~ /my_example\(xcb_connection_t\s\*c\,/;
+    }
+    with $res {
+        $res ~= ".0" unless +$res.parts > 2
+    }
+    die "Please provide --version=x.y.alpha on CLI" without $res;
+    $res;
+}
+
+sub MAIN (:$xmldir? is copy, :$version? is copy) {
+    my $distdir;
     unless $xmldir {
         $xmldir = @xmlpaths.grep(*.IO.d);
     }
-    unless $xmldir {
+    if $xmldir {
+        $xmldir .= IO;
+        $distdir = $xmldir;
+        if $xmldir.child("NEWS").f
+            and not +$xmldir.dir.grep(*.extension eq any <XML xml>) {
+            $xmldir .= child("src");
+        }
+    }
+    else {
         die q:to<EOHELP>;
             Could not find directory with XCB XML files.
             Please specify it as an option e.g. :xmldir(/path/to/xml)
             EOHELP
     }
-    $xmldir .= IO;
+
     my @xmlfiles = $xmldir.dir.grep(*.extension eq any <XML xml>).grep(*.basename ne any <xproto.xml>);
     @xmlfiles.unshift(|$xmldir.dir.grep(*.basename eq any <xproto.xml>));
 
+    if ($version) {
+        $version ~= ".0" unless $version ~~ /.+..+..+/;
+        $version = Version.new($version);
+    }
+    else {
+        $version = guess_xcbxml_version($distdir,@xmlfiles);
+    }
+    $append_version = (|$version.parts,|$generator_version.parts).join(".");
+    note "Module versions will be appended with $append_version";
 # for fast testing
 #@xmlfiles = @xmlfiles.grep(*.basename eq any <xproto.xml>);
     my @mods;
@@ -104,7 +174,6 @@ sub MAIN (:$xmldir? is copy) {
     MakeReplies($_) for @mods;
     MakeRequests($_) for @mods;
     MakeEpilogue($_) for @mods;
-#.enums.say for @mods;
     Output($_) for @mods;
 }
 
@@ -136,31 +205,38 @@ sub makemeth_child_structs(params $p, :$indent = 0) {
 }
 
 sub MakeMod ($xml) {
-    my $xmltree = from-xml-file($xml.Str);
-    unless $xmltree.root.name eq "xcb" {
-        die "file {$xml.Str} root tag of xcb not found"
-    }
     my $outname;
     my $cname;
     my $modname;
     my $extension;
     my $xextension;
+    my $xmltree = from-xml-file($xml.Str);
+    die "root tag of xcb not found in file {$xml.Str}"
+        unless $xmltree.root.name eq "xcb";
+
+    my $ver;
     given $xmltree.root {
         $cname = $modname = .attribs<header>;
         if $modname eq "xproto" {
             $modname = "XProto";
             $extension = False;
+            $ver = "11";
         }
         else {
             $extension = .attribs<extension-name>;
             $xextension = .attribs<extension-xname>;
             $modname = $extension;
+	    $ver = .attribs<major-version> ~ "." ~ .attribs<minor-version>;
         }
         $outname = "$modname.pm6";
     }
+    $ver = "\:ver<$ver\.$append_version>";
+
+    # Putting a version on XProto seems to break things.
+    $ver = "" if $modname eq "XProto";
 
     my $prologue = qq:to<EOP>;
-        unit module X11::XCB::$modname;
+        module X11::XCB::$modname$ver \{
 
         use NativeCall;
         use X11::XCB :internal, :DEFAULT;
@@ -242,7 +318,8 @@ sub NCtype ($t is copy) {
 }
 
 sub MakeTypeDefs ($mod) {
-    for (|$mod.xml.root.elements(:TAG<xidtype>),|$mod.xml.root.elements(:TAG<xidunion>)) -> $e {
+    for (|$mod.xml.root.elements(:TAG<xidtype>),
+         |$mod.xml.root.elements(:TAG<xidunion>)) -> $e {
         my $t = $e.attribs<name>;
         %nctypemap{$t} = $t ~ "ID";
         %nctypemap{$t ~ "ID"} = "uint32";
@@ -2439,6 +2516,8 @@ sub Output ($mod) {
            }).join(",\n").indent(4) }
         };
         EOEH
+
+    $out.print("\n}\n");
     say($mod.p6classes.grep({$_ ~~ /TODOP6/}).join);
     $out.close;
 }
