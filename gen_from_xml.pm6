@@ -10,7 +10,7 @@ my $append_version; # Gets appended to extension version
 class param is rw {
     has $.name;
     has $.c_attr = |();
-    has $.c_offset = |(); # not a real offset, just correct alignmentwise
+    has $.c_offset = 0; # not a real offset, just correct alignmentwise
     has $.p_attr = |();
     has $.p_subclasses = |();
     has $.c_doc = |();
@@ -42,6 +42,18 @@ class params does Associative {
         @.params .= grep(*.name ne $key);
         @res;
     }
+    has $.init_offset = 0;  # Length of top fields fixed up later
+}
+
+# What trailing alignment would C use at this point?
+# Note we do not know if a larger field will come along,
+# but so far, it seems the XCBXML always is explicit in
+# places where this answer does not equal the intrastructure
+# alignment, though that may not be intentional.
+my sub c_alignment_rules($p) {
+    ($p.init_offset, |(.c_offset for $p.params)).rotor(2 => -1).map(
+        -> ($a, $b) {$b - $a}
+    ).max;
 }
 
 class mod {
@@ -591,7 +603,8 @@ sub build_equation($f) {
 }
 
 my %cstructs = "sync:INT64" => "Counter64", "Behavior" => "Behavior", "NotifyData" => "NotifyData";
-sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is rw") {
+my %embeddable;
+sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw") {
     given ($f.isa(XML::Comment) ?? "pad" !! $f.name) {
         my $name = $f.can("attribs") ?? $f.attribs<name> !! $_;
         my $type = $f.can("attribs") ?? $f.attribs<type> !! $_;
@@ -603,17 +616,18 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                 %quirks{$type}($p, :$padnum);
                 succeed
             }
-            my $has = "has";
-            my $offset = +$p.params ?? $p.params[*-1].c_offset !! 0;
-            my $align = (0, |(.c_offset for $p.params)).rotor(2 => -1).map(-> ($a, $b) {$b - $a}).max;
+            my $offset = +$p.params ?? $p.params[*-1].c_offset !! $p.init_offset;
+            my $align = c_alignment_rules($p);
 
-            $p{$name}.c_attr = $found_list
-                ?? "# {NCtype($type)} \$.$name unfixed offset"
-                !! "has {NCtype($type)} \$.$name$rw;";
-
+            $p{$name}.c_attr = "has {NCtype($type)} \$.$name$rw;";
             $p{$name}.p_attr = "has \$.$name is rw;";
 
-            if $found_list {
+            if %cstructs{$type}:exists and not %embeddable{$type} {
+		$dynsize = True;
+            }
+            if $dynsize {
+                $p{$name}.c_attr =
+                    "# $type \$.$name outside cstruct";
                 $p{$name}.p2c_code = qq:to<EOPC>;
                     \{
                         my \$cl = class :: is repr("CStruct") \{
@@ -634,24 +648,20 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
             if %cstructs{$type}:exists {
                 $offset += $align;
                 my $pptype = %cstructs{$type};
-                if $found_list {
+                if $dynsize {
                     $p{$name}.c2p_code = qq:to<EOPC>;
                         @args.append:
                             "$name",
                             $pptype\.new(Pointer.new(\$p + \$oleft - \$left),
                                          :\$left, :!free);
                         EOPC
-                    $p{$name}.p2c_init = qq:to<EOPI>;
-                        \{
-                            my \$c = {$pptype}::cstruct.new.nativize(\$p6.$name);
-                            nativecast(CArray[uint8],\$\!$name)[
-                                ^{$pptype}::cstruct.wiresize] =
-                                nativecast(CArray[uint8],\$c)[
-                                    ^{$pptype}::cstruct.wiresize];
-                        }
+                    $p{$name}.p2c_code = qq:to<EOPI>;
+                        # TODO: dwimmery
+                        @bufs.append: \$\!$name.bufs;
                         EOPI
                 }
                 else {
+                    $p{$name}.c_offset = $offset;
                     $p{$name}.c_attr = qq:to<EOCT>;
                         # TODO: need to verify correct packing
                         HAS {$pptype}::cstruct \$.$name$rw;
@@ -678,12 +688,12 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                         }
                         EOPI
 #                        self.^attributes.first(*.name eq '\$\!$name').set_value(self,do given {$pptype}::cstruct.new \{ .nativize(\$p6.$name), \$_ });
-
-
                 }
             }
 
             else {
+                note "Expected align mod {NCsizetype($type)}, got $offset for $name"
+                    if $offset % NCsizetype($type);
                 $offset += NCsizetype($type);
 
                 $p{$name}.c_attr ~= qq:to<EOCA>;
@@ -691,7 +701,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                 constant {$name}___maxof =
                     2 ** (wiresize({NCtype($type)}) * 8) - 1;
                 EOCA
-                if $found_list {
+                if $dynsize {
                     $p{$name}.c2p_code = qq:to<EOPC>;
                         @args.append:
                             "$name",
@@ -701,7 +711,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                                 nativecast(Pointer[{NCtype($type)}], Pointer.new(\$p + \$oleft - \$left)).deref
                              }
                              else \{ die "Short Packet" }
-                            )
+                            );
                         EOPC
                 }
             }
@@ -719,84 +729,22 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
             $p{$name}.fd_init = '$.' ~ $name ~ ' = $fdb[$i]; $i++;';
             $p{$name}.fd_send = 'xcb_send_fd($c.xcb, $.' ~ $name ~ ');';
         }
-        when "pad" {
-            # Embedded pad inside static structure
-            if ($f.isa(XML::Comment) and not $found_list) or (not $f.isa(XML::Comment) and $f.attribs<align>:exists) {
-                my $offset = $p.params[*-1].c_offset;
-                my $align;
-                $padnum++;
-                $align = $f.attribs<align> if $f.attribs<align>:exists;
-                $align //= (0, |(.c_offset for $p.params)).rotor(2 => -1).map(-> ($a, $b) {$b - $a}).max;
-
-                while ($offset % $align) {
-                    given "pad{$padnum}_{$align - $_ - 1}" {
-                       $p{$_}.c_offset = $offset + 1;
-                       $p{$_}.c_attr = "has uint8 \$.$_;";
-                       $p{$_}.p_attr = "# padding here in CStruct";
-                    }
-                    $offset--;
-                }
-                succeed;
-            }
-            # Pad in dynamic part of packet.
-            if $found_list {
-                $padnum++;
-                my $align = (0, |(.c_offset for $p.params)).rotor(2 => -1).map(-> ($a, $b) {$b - $a}).max;
-                $p{"pad$padnum"}.p2c_code = qq:to<EOCP>;
-                    # TODO: we are assuming everything before us is aligned here
-                    \@bufs.push(padbuf(([-] 0, |(.bytes for \@bufs)) % $align));
-                    EOCP
-                $p{"pad$padnum"}.c2p_code = qq:to<EOPC>;
-                    \{
-                        my \$align = {(not $f.isa(XML::Comment) and $f.attribs<align>:exists) ?? $f.attribs<align> !! '$.cstruct.calign'};
-                        my \$newp = nativecast(Pointer[uint8], \$p);
-                        my \$oldp = nativecast(Pointer[uint8], \$pstruct);
-
-                        \$left -= (\$oldp - \$newp - \$oleft + \$left) % $align;
-                        die("Short packet")
-                            unless \$left >= 0;
-                    }
-                    EOPC
-                succeed;
-            }
-            $padnum++;
-            (for 0..^$f.attribs<bytes> {
-                given "pad{$padnum}_$_" {
-                   $p{$_}.c_attr = "has uint8 \$.$_;";
-                   $p{$_}.p_attr = "# padding here in CStruct";
-                }
-            }).join(" ");
-        }
         when "list" {
             if $name ~~ /^alignment_pad/ {
-                # Not really a list.  A pad.
-                $found_list++;
-                my $align = $f.elements(:RECURSE, :TAG<unop>, :op<~>).first({$_.elements(:FIRST, :TAG<value>)[0].contents ~~ /^\s*\d+\s*/});
-                $align = +$align.elements(:FIRST, :TAG<value>)[0].contents + 1;
-                # Map String directly to Perl6 Str
-                $p{$name}.c_offset = (+$p.params ?? $p.params[*-1].c_offset !! 0) + $align;
-                $p{$name}.c_attr = "# Dynamic layout: alignment padding";
-                $p{$name}.p_attr = "# Padding for alignment here in CStruct";
-
-                $TODOP6++;
-                $p{$name}.p2c_code = qq:to<EOCC>;
-                    # TODO: we are assuming everything before us is aligned here
-                    \@bufs.push(padbuf(([-] 0, |(.bytes for \@bufs)) % $align));
-                    EOCC
-                $p{$name}.c2p_code = qq:to<EOPC>;
-                    if ($align) \{
-                        my \$newp = nativecast(Pointer[uint8], \$p);
-                        my \$oldp = nativecast(Pointer[uint8], \$pstruct);
-
-                        \$left -= (\$oldp - \$newp - \$oleft + \$left) % $align;
-                        die("Short packet")
-                            unless \$left >= 0;
-                    }
-                    EOPC
+                # Not really a list.  A complicated XML mess of a formula
+                # for how much padding is needed to keep C-like alignment.
+                # Since the protocol is relatively consistent about alignment,
+                # we can just as easily deduce that.
+                #
+                # Newer XCBXML has less of these as they added an alignment
+                # checker as well.
+                #
+                # Send it down to the padding case
+                proceed;
             }
-            elsif not +$f.elements or
+            if not +$f.elements or
                 $f.elements».name.join(" ") ne any <fieldref value> {
-                $found_list++;
+                $dynsize = True;
                 my $eq;
                 if +$f.elements {
                     $eq = build_equation($f);
@@ -982,7 +930,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
             elsif $f.elements(:TAG<value>) -> [ $val ] {
                 my $frval = $val.contents.Str.Int;
                 my $nct = NCtype($type);
-                unless $found_list {
+                unless $dynsize {
                     # We know where the structure is exactly and it is
                     # a fixed size structure.  Until CStruct can handle
                     # shaped arrays, pad it out.
@@ -1015,13 +963,13 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                 if $f.attribs<type> eq "char" {
                     $p{$name}.c_attr ||= "# Dynamic layout: $name\[$frval] chars";
                     $p{$name}.p_attr = "has \$.$name is rw;";
-                    $p{$name}.p2c_code = qq:to<EOCC> if $found_list;
+                    $p{$name}.p2c_code = qq:to<EOCC> if $dynsize;
                     given \$\.{$name}.encode('utf8') \{
                         die "String must be $frval bytes" if .elems != $frval;
                         \@bufs.push(Blob.new(\$_.values)
                     }
                     EOCC
-                    $p{$name}.c2p_code = qq:to<EOPC> if $found_list;
+                    $p{$name}.c2p_code = qq:to<EOPC> if $dynsize;
                     die("Short packet")
                         unless \$left >= $frval;
                     @args.append: "$name",
@@ -1037,7 +985,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                     $p{$name}.c_attr ||=
                         "# Dynamic layout: $name\[$frval] of $type";
                     $p{$name}.p_attr = "has \@.$name is rw;";
-                    $p{$name}.p2c_code = qq:to<EOCC> if $found_list;
+                    $p{$name}.p2c_code = qq:to<EOCC> if $dynsize;
                         \@bufs.push: Blob[$nct].new(|\@.$name);
                         EOCC
                 }
@@ -1048,7 +996,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                 }
             }
             elsif $f.elements(:TAG<fieldref>) -> [ $fr ] {
-                $found_list++;
+                $dynsize = True;
                 my $frname = $fr.contents.Str;
                 if $f.attribs<type> eq "STRING8" or
                     $f.attribs<type> eq "char"
@@ -1309,7 +1257,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
             }
         }
         when "valueparam" {
-            $found_list = 1;
+            $dynsize = True;
             # Replaced by "switch" but some people may be working
             # off older xml files.
 
@@ -1379,7 +1327,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
 
         }
         when "switch" {
-            $found_list = 1;
+            $dynsize = True;
             my $pname = $name;
             my @names = ($f.elements(:FIRST).name eq "fieldref" ?? $f.elements(:FIRST).contents.Str
                 !! (.contents.Str for $f.elements(:FIRST).elements(:TAG<fieldref>, :RECURSE)));
@@ -1395,7 +1343,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
 
             # Only handle formulas like fee & (fie & (~foo & ~fum)) for now.
             # (Really, we are doing this all for one particular request, but hey,
-            #  maybe it will be useful for a future or unpublished extension) 
+            #  maybe it will be useful for a future or unpublished extension)
 	    if +@names > 1 {
                 if $f.elements(:FIRST).name eq "op" {
                     my multi sub formulize ($node where { $_.name eq "op" }) {
@@ -1539,6 +1487,67 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $found_list is rw, $rw = " is
                 EOPC
         }
         when "doc" | "reply" {
+            # Handled elsewhere
+            succeed;
+        }
+        when "pad" | "list" { # "list" is proceeding from above
+            unless $dynsize {
+
+                my $offset = $p.params.elems ?? $p.params[*-1].c_offset !! $p.init_offset;
+
+                # Embedded pad inside static structure
+                if not $f.isa(XML::Comment) and $f.attribs<bytes>:exists {
+                    # Explicit size
+                    $padnum++;
+                    (for 0..^$f.attribs<bytes> {
+                        given "pad{$padnum}_$_" {
+                            $p{$_}.c_offset = ++$offset;
+                            $p{$_}.c_attr = "has uint8 \$.$_;";
+                            $p{$_}.p_attr = "# padding here in CStruct";
+                        }
+                    }).join(" ");
+                    succeed;
+                }
+                # <pad align=X>, or an alignment_pad "list", or a "pad" comment
+                # from before alignment markup.  Reckon it from structure.
+                # Note c_offset does not necessarily increase by the actual
+                # size of its structure member, maybe the size mod 8.
+                my $align = c_alignment_rules($p);
+                if not $f.isa(XML::Comment) and $f.attribs<align>:exists {
+                    $align = $f.attribs<align>
+                }
+                $padnum++;
+                my $off = $offset;
+                while ($off % $align) {
+                    given "pad{$padnum}_{$align - $_ - 1}" {
+                       $p{$_}.c_offset = ++$offset;
+                       $p{$_}.c_attr = "has uint8 \$.$_;";
+                       $p{$_}.p_attr = "# padding here in CStruct";
+                    }
+                    $off--;
+                }
+                succeed;
+            }
+            # Pad in dynamic part of packet.
+            $padnum++;
+            my $align = '$.cstruct.calign';
+            if not $f.isa(XML::Comment) and $f.attribs<align>:exists {
+                $align = $f.attribs<align>
+            }
+            $p{"pad$padnum"}.p2c_code = qq:to<EOCP>;
+                # TODO: we are assuming everything before us is aligned here
+                \@bufs.push(padbuf(([-] 0, |(.bytes for \@bufs)) % \$.cstruct.calign));
+                EOCP
+            $p{"pad$padnum"}.c2p_code = qq:to<EOPC>;
+                \{
+                    my \$align = $align;
+                    my \$newp = nativecast(Pointer[uint8], \$p);
+                    my \$oldp = nativecast(Pointer[uint8], \$pstruct);
+
+                    \$left -= (\$oldp - \$newp - \$oleft + \$left) % \$align;
+                    die("Short packet") unless \$left >= 0;
+                }
+                EOPC
             succeed;
         }
         default {
@@ -1616,10 +1625,10 @@ sub MakeErrors($mod) {
     for $mod.xml.root.elements(:TAG<error>) -> $error {
         my params $p .= new;
         my $padnum = -1;
-        my $found_list = 0;
+        my $dynsize = 0;
         %errorcopies{$oname ~ $error.attribs<name>.Str} := $p;
         for $error.nodes -> $e {
-            MakeCStructField($p, $e, $padnum, $found_list)
+            MakeCStructField($p, $e, $padnum, $dynsize)
                 if $e.isa(XML::Element)
                 or $e.isa(XML::Comment) and $e.data ~~ /:i pad/
         }
@@ -1736,13 +1745,18 @@ sub MakeEvents($mod) {
     my $oname = $mod.cname eq "xproto" ?? "" !! $mod.modname;
 
     for $mod.xml.root.elements(:TAG<event>) -> $event {
-        my params $p .= new;
+        my params $p .= new(:init_offset(3));
         my $padnum = -1;
-        my $found_list = 0;
+        my $dynsize = 0;
+
+        if $event.attribs<xge>:exists and $event.attribs<xge>:exists ~~ /:i true/ {
+            $mod.p6classes.push("TODOP6: XGE event {$oname}::{$event.attribs<name>.Str}\n");
+            next
+        }
 
         %eventcopies{$oname ~ $event.attribs<name>.Str} := $p;
         for $event.nodes -> $e {
-            MakeCStructField($p, $e, $padnum, $found_list)
+            MakeCStructField($p, $e, $padnum, $dynsize)
                 if $e.isa(XML::Element)
                 or $e.isa(XML::Comment) and $e.data ~~ /:i pad/
         }
@@ -1771,6 +1785,8 @@ sub MakeEvents2($mod) {
         my params $p;
         my $padnum = -1;
         my $ename = $event.attribs<name>;
+
+        next without %eventcopies{$oname ~ $ename}; # Remove this after XGE events implemented
 
         if $event.name eq "eventcopy" {
             $p := %eventcopies{$oname ~ $event.attribs<ref>.Str} //
@@ -1871,13 +1887,13 @@ sub MakeCases($bitswitch) {
         my $padnum = -1;
         my @reqfields;
         my params $p .= new;
-        my $found_list = 0;
+        my $dynsize = 0;
         my $roles = "";
         my $enumref = $bitcase.elements(:TAG<enumref>)[0];
 
         for $bitcase.elements -> $e {
             next if $e.name eq "enumref";
-            MakeCStructField($p, $e, $padnum, $found_list);
+            MakeCStructField($p, $e, $padnum, $dynsize);
         }
         for $bitcase.elements -> $e {
             next if $e.name eq "enumref";
@@ -1894,7 +1910,8 @@ sub MakeCases($bitswitch) {
             }
         }
 
-        @cstructs.push(qq:to<EOCS>);
+        my @has = $p.params».c_attr;
+        @cstructs.push: @has.first(/:i^^\s*has\s/) ?? qq:to<EOCS>
 
                 our class cstruct does cpacking is repr("CStruct") \{
 
@@ -1902,17 +1919,23 @@ sub MakeCases($bitswitch) {
 
                     method Hash \{
                         \{
-            {$p.params».c2p_arg.join(",\n").indent(20)}
+            {$p.params».c2p_arg.join(",\n").indent(16)}
                         }
                     }
-
                     method nativize(\$p6) \{
-            {$p.params».p2c_init.join("\n").indent(16)}
+            {$p.params».p2c_init.join("\n").indent(12)}
                     }
 
                 };
                 my \$.cstruct = cstruct;
             EOCS
+            !! qq:to<EONC>;
+            {({ |(.c_doc, .c_attr) } for $p.params).join("\n").indent(8)}
+                my \$.cstruct = cpacking;
+                method bufs \{
+                    |self.child_bufs;
+                }
+            EONC
 
         my $ename = $enumref.attribs<ref> ~ "Enum::" ~ $enumref.contents.Str;
         my $clname = $pname ~ "::" ~ $enumref.attribs<ref> ~ "::" ~ $enumref.contents.Str;
@@ -1974,18 +1997,18 @@ sub MakeStructs($mod) {
         my $padnum = -1;
         my @reqfields;
         my params $p .= new;
-        my $found_list = 0;
+        my $dynsize = 0;
         my $roles = "";
 
         for $struct.nodes -> $e {
-            MakeCStructField($p, $e, $padnum, $found_list)
+            MakeCStructField($p, $e, $padnum, $dynsize)
                 if $e.isa(XML::Element)
                 or $e.isa(XML::Comment) and $e.data ~~ /:i pad/
         }
         for $struct.elements -> $e {
             if $struct.elements(:TAG<doc>) -> [ $doc ] {
                  if $doc.elements(:TAG<field>).grep(
-                     {$e.attribs<name>:exists and 
+                     {$e.attribs<name>:exists and
                       $_.attribs<name> eq $e.attribs<name>}) -> [ $fdoc ] {
                      my $docstr =
                          ("#| $_" for $fdoc.cdata».data».Str.lines).join("\n");
@@ -1996,7 +2019,8 @@ sub MakeStructs($mod) {
             }
         }
 
-        @cstructs.push(qq:to<EOCS>);
+        my @has = $p.params».c_attr;
+        @cstructs.push: @has.first(/:i^^\s*has\s/) ?? qq:to<EOCS>
 
                 our class cstruct does cpacking is repr("CStruct") \{
 
@@ -2013,8 +2037,14 @@ sub MakeStructs($mod) {
 
                 };
                 my \$.cstruct = cstruct;
-
             EOCS
+            !! qq:to<EONC>;
+            {({ |(.c_doc, .c_attr) } for $p.params).join("\n").indent(8)}
+                my \$.cstruct = cpacking;
+                method bufs \{
+                    |self.child_bufs;
+                }
+            EONC
 
         my $clname = $struct.attribs<name>.Str;
         $clname = $clname.lc.tc if $clname ~~ /^<upper>+$/;
@@ -2027,7 +2057,13 @@ sub MakeStructs($mod) {
             when "INT64" { "Counter64" }
             default    { $_  }
         });
-        %cstructs{$struct.attribs<name>} = $clname;
+        my $n = $struct.attribs<name>;
+        %cstructs{$n} = $clname;
+        while %cstructs{$n}:exists {
+            %embeddable{$n} = True unless $dynsize;
+            last if $n eq %cstructs{$n} or $++ > 20;
+	    $n = %cstructs{$n};
+        }
 
         if $mod.occlude{$struct.attribs<name>} {
             $roles ~= $mod.occlude{$struct.attribs<name>};
@@ -2151,22 +2187,22 @@ sub MakeReplies($mod) {
         next unless (for $req.elements(:TAG<reply>) -> $rep {
             my $padnum = -1;
             my @reqfields;
-            my params $p .= new;
-            my $found_list = 0;
+            my params $p .= new(:init_offset($mod.extension ?? 7 !! 7));
+            my $dynsize = 0;
 
             state $two = 1;
             die "Two replies for request" if $two > 1;
             $two++;
 
             for $rep.elements -> $e {
-                MakeCStructField($p, $e, $padnum, $found_list)
+                MakeCStructField($p, $e, $padnum, $dynsize)
                     if $e.isa(XML::Element)
                     or $e.isa(XML::Comment) and $e.data ~~ /:i pad/
             }
             for $rep.elements -> $e {
                 if $rep.elements(:TAG<doc>) -> [ $doc ] {
                     if $doc.elements(:TAG<field>).grep(
-                        {$e.attribs<name>:exists and 
+                        {$e.attribs<name>:exists and
                          $_.attribs<name> eq $e.attribs<name>}) -> [ $fdoc ] {
                         my $docstr =
                              ("#| $_" for $fdoc.cdata».data».Str.lines).join("\n");
@@ -2264,8 +2300,8 @@ sub MakeRequests($mod) {
         my $p6args = "";
         my $padnum = -1;
         my @reqfields;
-        my params $p .= new;
-        my $found_list = 0;
+        my params $p .= new(:init_offset($mod.extension ?? 4 !! 3));
+        my $dynsize = 0;
         my $flagroles = "";
         my $fdsend = "";
 
@@ -2273,14 +2309,14 @@ sub MakeRequests($mod) {
         next if $req.attribs<name> eq "SetupAuthenticate";
 
         for $req.elements -> $e {
-            MakeCStructField($p, $e, $padnum, $found_list)
+            MakeCStructField($p, $e, $padnum, $dynsize)
                 if $e.isa(XML::Element)
                 or $e.isa(XML::Comment) and $e.data ~~ /:i pad/
         }
         for $req.elements -> $e {
             if $req.elements(:TAG<doc>) -> [ $doc ] {
                  if $doc.elements(:TAG<field>).grep(
-                     {$e.attribs<name>:exists and 
+                     {$e.attribs<name>:exists and
                       $_.attribs<name> eq $e.attribs<name>}) -> [ $fdoc ] {
                      my $docstr =
                          ("#| $_" for $fdoc.cdata».data».Str.lines).join("\n");
