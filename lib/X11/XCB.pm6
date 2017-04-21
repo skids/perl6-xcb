@@ -497,10 +497,7 @@ our role Event[$event_code] is export(:internal) {
     }
 }
 
-our role Struct is export(:internal) {
-
-    method cstruct {...}
-
+our role MonoStruct is export(:internal) {
     #| Create a new X11 protocol substructure Perl6 object.
     #| A first parameter, if provided, is a Pointer to buffer data.
     #| If provided, :left designates the length of data (in bytes) available
@@ -534,6 +531,13 @@ our role Struct is export(:internal) {
         }
         $res;
     }
+}
+
+our role Struct is export(:internal) {
+
+    method cstruct {...}
+
+
     multi method new (Pointer $p, Int :$left!, Bool :$free = True) {
         my Int $l = $left;
         self.new($p, :left($l), :$free);

@@ -268,11 +268,18 @@ pairs:
 
 ```perl6
 use X11::XCB::RandR;
-NotifyData(2).name.say; # says ProviderChange
-NotifyData().elems.say; # says 6
+&NotifyData(2).name.say; # says ProviderChange
+&NotifyData().elems.say; # says 6
 ```
+
+...unfortunately this no longer works without using the C<&> sigil.
 
 A parameteric role by the same name of the subroutine is mixed into the
 member classes.  Also inside the namespace of that role, ::cstruct
 refers to a CUnion structure composed of all the respective ::cstruct
 of the member classes.
+
+Classes belonging to such a group can be autodetected by the
+constructors of classes that contain them, or by that of the
+role itself in the case of a tagged union, so there is no
+need for separate handling of the type discriminator field.

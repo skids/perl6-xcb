@@ -7,9 +7,12 @@ my @xmlpaths = "/usr/share/xcb";
 my $generator_version = v0.alpha; # NOTE: I only update this on git tags
 my $append_version; # Gets appended to extension version
 
+my %embeddable; # List of structs which are embeddable with HAS
+
 class param is rw {
     has $.name;
     has $.c_attr = |();
+    has $.c_type;
     has $.c_offset = 0; # not a real offset, just correct alignmentwise
     has $.p_attr = |();
     has $.p_subclasses = |();
@@ -43,6 +46,16 @@ class params does Associative {
         @res;
     }
     has $.init_offset = 0;  # Length of top fields fixed up later
+    has params $.parent;    # For nesting
+    has $.child_structs is rw = [];  # extra code at top of child_structs method
+    method find_param_owner ($name) {
+        my $p = self;
+        while $p.defined {
+            last if $p{$name}:exists;
+            $p = $p.parent;
+        }
+        $p;
+    }
 }
 
 # What trailing alignment would C use at this point?
@@ -56,6 +69,162 @@ my sub c_alignment_rules($p) {
     ).max;
 }
 
+# For unions where variants are selected by an enum, we occlude
+# that enum behind a role/pun which causes variant type
+# objects to numify into their corresponding enum value.
+# This reduces namespace fudgery and is simpler to use,
+# as we have less identifiers jostling around.
+class occlude {
+    has $.class;   # Class representing the union
+
+    # Class of generic variant that pads out a union,
+    # or if none exists, == $.class
+    has $.generic = $!class;
+
+    # Class where we find this union as a member,
+    # or if this is a self-multiplexing union, == $.generic
+    has $.envelope = $!generic;
+
+    has $.typer;   # Field in $.envelope used to decide which subtype to use
+    has $.typee;   # Field in $.envelope with union body or remainder therof
+    has $.enum;    # Name of enum used in $.typer to choose types
+    has &.toenum = { $_ };  # converts subtype names to enum values
+    has &.totype = { $_ };  # converts enum values to subtype names
+    has @.cattrs is rw;
+
+    method cstruct {
+        "class {$.class}::cstruct does cpacking \{ # is repr('CUnion') from stub above\n"
+        ~
+        ("HAS $_\:\:cstruct \$\.$_;" for @.cattrs).join("\n").indent(4)
+        ~
+        q:to<EOWS>
+
+            method wiresize {
+                state $ = max(|(wiresize($_.type) for ::?CLASS.^attributes))
+            }
+        EOWS
+        ~
+        "\n}\n";
+    }
+
+    # Generate map of subtype names to does clauses to add to them.
+    method doeses($enum) {
+        my %res;
+
+        (for $enum.elements(:TAG<item>) -> $item {
+            my $v = $item.elements[0];
+            my $n = $item.attribs<name>;
+            if $v.name eq "bit" {
+                $v = 1 +< $v.nodes[0].text;
+            }
+            else {
+                $v = $v.nodes[0].text;
+            }
+            (&.totype)($n) => " does $.class\[$v]";
+        })
+    }
+
+    # Generate the glue code implementing the guts of the role
+    # and type coercers.
+    method gluecode {
+        my $rname = $.class;
+        my $morph = "";
+        my $does = "";
+
+        %embeddable{$.generic} = True; # A bit hacky to do this here
+
+        if $.envelope eq $.generic {
+            $morph = self.morphstructor;
+        }
+        else {
+            $does = "does MonoStruct ";
+        }
+        qq:to<EOOC>;
+
+            # Implement a collection of classes whose type objects
+            # act like the values of the enum $.enum, rather than
+            # providing that enum.
+            my \%$rname;
+
+            role $rname\[Int \$i = -1] $does\{
+                multi method Numeric (::?CLASS:U:) \{ \$i }
+                multi method Int (::?CLASS:U:) \{ \$i }
+
+                \%$rname := :\{} unless \%$rname.defined;
+                \%$rname\{\$i} = ::?CLASS unless \$i < 0;
+
+            {$morph.indent(4)}
+            }
+
+            multi sub $rname (Numeric() \$i) is export \{
+                \%$rname\{\$i.Int};
+            }
+            multi sub $rname ($rname\:D \$r) is export \{
+                \%$rname\{\$r.WHAT.Numeric};
+            }
+            multi sub $rname () is export \{
+                \%$rname.sort.list;
+            }
+
+            class {$rname}::cstruct is repr("CUnion") \{...}
+
+            EOOC
+
+    }
+
+    method fixparams (params $p is rw, :$subclass?) {
+        if $.envelope =:= $.generic {
+            if $subclass.defined {
+                $p{$.typer}.p2c_init = "\$\!$.typer = +\$p6.WHAT;";
+                return;
+            }
+        }
+        return if $.envelope =:= $.generic or $subclass.defined;
+
+        $p{$.typer}.p2c_init = "\$\!$.typer = +\$p6.$.typee.WHAT;";
+        $p{$.typer}.p_attr = |();
+        $p{$.typer}.c2p_arg = |();
+        $p{$.typee}.c2p_arg = qq:to<EOPA>;
+            :{$.typee}(\%$.generic\{\$\!$.typer}.new(nativecast(Pointer[uint8],\$\!$.typee),
+                :left({$.generic}::cstruct.wiresize), :!free))
+            EOPA
+
+
+    }
+
+    method morphstructor () {
+        qq:to<EOCC>;
+            multi method new (Pointer \$p, Int :\$left! is rw, Bool :\$free = True) \{
+                my \$to = \:\:\?CLASS.WHO<cstruct>;
+                # We assume typer is not in a dynamic part of the struct
+                my \$cs = nativecast(\$to, \$p);
+                fail("Short packet.") unless \$left >= \$to.wiresize;
+                my \$variant = \%$.class\{\$cs.$.typer};
+		\$variant.new(\$p, :\$left, :\$free);
+            }
+
+            EOCC
+    }
+}
+
+# This part has to be done by hand... information for each
+# self-multiplexed union in each module
+my %Occludes is default(|()) =
+    "randr" => ( occlude.new(:generic<NotifyData>, :class<NotifyData>,
+                             :envelope<NotifyEvent>,
+                             :typer<subCode>, :typee<u>, :enum<Notify>)
+               ),
+    "xkb"   => ( occlude.new(:generic<SIAction>, :class<Action>,
+                             :typer<type>, :typee<data>, :enum<SAType>,
+                             :toenum({ $_ ~~ /^SA(.*)$/; $/[0].Str}),
+                             :totype({ "SA$_" }))
+               )
+    # TODO
+    # XInput: InputClass Feedbackclass DeviceControl DeviceClassType maybe more
+    # xkb: EventType DoodadType Behavior(undo current first cut) and maybe more
+    # ...and retool event enums everywhere to act similarly
+;
+
 class mod {
     has $.xml;
     has $.cname;
@@ -65,6 +234,7 @@ class mod {
     has $.xextension;
     has $.prologue is rw;
     has @.enums is rw;
+    has %.renums is rw;
     has @.typedefs is rw;
     has %.subclasses is rw;
     has @.cstructs is rw;
@@ -73,8 +243,55 @@ class mod {
     has %.opcodes is rw;
     has %.errors is rw;
     has %.events is rw;
-    has %.occlude is rw;
+    has %.occlude is rw; # resulting code of occlusions
+    has @.occludes is rw;
     has Array %.rolecstruct is rw;
+
+    my @.allmods; # Global state: instances of this class
+
+    method new (|c) {
+        my $res = self.bless(:occludes(%Occludes{c<cname>,}), |c);
+        @.allmods.push($res);
+        $res;
+    }
+
+    # Look up a mod by its name (for cross-module references e.g. "shape:KIND")
+    method of_str ($str) {
+        @.allmods.first(*.cname eq $str);
+    }
+
+    # Rarely, we need to know what mod we are working on.
+    # Passing that through as state is bloaty.
+    method of_xml ($xml) {
+        my $cname = $xml.ownerDocument.root.attribs<header>;
+        self.of_str($cname);
+    }
+
+    multi method renum(Str $enum) {
+        if $enum ~~ m/(<-[:]>+)\:(.*)/ {
+            self.of_str($/[0]).renums{$/[1]}.key;
+        }
+        else {
+            %.renums{$enum}.key;
+        }
+    }
+
+    multi method renum(XML::Node $xml, Str $enum) {
+        self.of_xml($xml).renum($enum);
+    }
+
+    multi method renumv(Str $enum, Str $enumv) {
+        if $enum ~~ m/(<-[:]>+)\:(.*)/ {
+            self.of_str($/[0]).renums{$/[1]}.value.{$enumv};
+        }
+        else {
+            %.renums{$enum}.value.{$enumv};
+        }
+    }
+
+    multi method renumv(XML::Node $xml, Str $enum, Str $enumv) {
+        self.of_xml($xml).renumv($enum, $enumv);
+    }
 }
 
 class bitswitch {
@@ -209,6 +426,7 @@ sub makemeth_child_structs(params $p, :$indent = 0) {
         method child_structs(Pointer \$p, \$pstruct, Real :\$left! is rw) \{
             my @args;
             my \$oleft = \$left;
+        {$p.child_structs.join("\n").indent($indent + 4)}
         {$c2p_code.join("\n").indent($indent + 4)}
             |@args;
         }
@@ -345,7 +563,7 @@ sub NCevaltype ($t) {
     %nctypemap_eval{$t}
 }
 
-# Also, cache nativesizeofs
+# Also, easy access to nativesizeofs
 our %nctypemap_size;
 sub NCsizetype ($t) {
     use NativeCall;
@@ -356,7 +574,7 @@ sub NCsizetype ($t) {
     %nctypemap_size{$t}
 }
 sub NCmasktype ($t) {
-    (1 +< NCsizetype($t)) - 1
+    (1 +< (NCsizetype($t) * 8)) - 1
 }
 
 sub MakeTypeDefs ($mod) {
@@ -386,15 +604,8 @@ sub MakeTypeDefs ($mod) {
     }
 }
 
-# Deal with enums and unions that are used to multiplex classes
-our %ClassOcclude = "randr:Notify" => "NotifyData";
-our %ClassMultiplex = "randr:Notify" => "u:subCode";
-# TODO
-# XInput: InputClass Feedbackclass DeviceControl DeviceClassType maybe more
-# xkb: EventType DoodadType SAType Behavior(undo current first cut) and maybe more
-# ...and retool event enums everywhere to act similarly
 
-our %EnumRemap;
+
 sub MakeEnums ($mod) {
 
     # Fixup/perlify for enum type names that conflict
@@ -486,52 +697,13 @@ sub MakeEnums ($mod) {
     for $mod.xml.root.elements(:TAG<enum>) -> $e {
         my $ename = $e.attribs<name>;
 
-        if %ClassOcclude{$mod.cname ~ ":" ~ $e.attribs<name>}:exists {
-
-            my $rname = %ClassOcclude{$mod.cname ~ ":" ~ $ename};
-
-            for $e.elements(:TAG<item>) -> $item {
-                state $lastval = -Inf;
-                my $v = $item.elements[0];
-                my $n = $item.attribs<name>;
-                if $v.name eq "bit" {
-                    $v = 1 +< $v.nodes[0].text;
-                }
-                else {
-                    $v = $v.nodes[0].text;
-                }
-                $mod.occlude{$n} = " does $rname\[$v]";
-            }
-
-            $mod.enums.push(qq:to<EOOC>);
-
-            my \%$rname;
-
-            role $rname\[Int \$i] \{
-                multi method Numeric (::?CLASS:U:) \{ \$i }
-                multi method Int (::?CLASS:U:) \{ \$i }
-
-                \%$rname := :\{} unless \%$rname.defined;
-                \%$rname\{\$i} = ::?CLASS;
-            }
-
-            multi sub $rname (Numeric() \$i) is export \{
-                \%$rname\{\$i.Int};
-            }
-            multi sub $rname ($rname\:D \$r) is export \{
-                \%$rname\{\$r.WHAT.Numeric};
-            }
-            multi sub $rname () is export \{
-                \%$rname.sort.list;
-            }
-
-            class {$rname}::cstruct is repr("CUnion") \{...}
-
-            EOOC
+        if $mod.occludes.first(*.enum eq $ename) -> $occlude {
+            $mod.occlude.append($occlude.doeses($e));
+            $mod.enums.push($occlude.gluecode);
         }
         else {
             $ename = fix_name($ename);
-            %EnumRemap{"{$mod.cname} {$e.attribs<name>.Str}"} = $ename;
+	    $mod.renums{$e.attribs<name>.Str} = ($ename => { });
             (my $export_ext, my $export_int) = fix_export($e);
 
             $mod.enums.push:
@@ -540,7 +712,9 @@ sub MakeEnums ($mod) {
             (for $e.elements(:TAG<item>) -> $item {
                 state $lastval = -Inf;
                 my $v = $item.elements[0];
-                my $n = fix_valname($item.attribs<name>, $ename);
+                my $n = $mod.renums{$e.attribs<name>.Str}.value{$item.attribs<name>}
+                      = fix_valname($item.attribs<name>, $ename);
+
                 if $v.name eq "bit" {
                     $v = 1 +< $v.nodes[0].text;
                 }
@@ -603,7 +777,79 @@ sub build_equation($f) {
 }
 
 my %cstructs = "sync:INT64" => "Counter64", "Behavior" => "Behavior", "NotifyData" => "NotifyData";
-my %embeddable;
+
+sub c2p_parse_dynamic(params $p, $type) {
+    if %cstructs{$type}:exists {
+        "$type\.new(Pointer.new(\$p + \$oleft - \$left), :\$left, :!free);"
+    }
+    else {
+        my $nctype = NCtype($type);
+        qq:to<EOPD>;
+            (if \$left >= wiresize($nctype) \{
+                 LEAVE \{ \$left -= wiresize($nctype); }
+                 nativecast(Pointer[$nctype], Pointer.new(\$p + \$oleft - \$left)).deref
+             }
+             else \{ die "Short Packet" }
+            );
+            EOPD
+    }
+}
+
+sub MakeSparseArray(params $p, $name, $type, $kfr) {
+    my $keyname;
+    my $keyiter;
+    my $keypush;
+    my $keyfrob;
+    my $keyparm;
+    my $keyvar;
+
+    if ($kfr.name eq "fieldref") {
+        $keyname = $kfr.contents.Str;
+        my $owner = $p.find_param_owner($keyname);
+        $keyparm = $owner{$keyname};
+
+        if $p !=:= $keyparm {
+            # Direct use of field from parent structure.  Go back
+            # into the parent code and make a dynamic variable to
+            # carry it into our scope.
+            $keyvar = "\$\*parent___$keyname";
+            $owner.child_structs.push:
+                "my $keyvar = \$pstruct\.$keyname;";
+
+        }
+        else {
+            $keyvar = "\$\!$keyname";
+        }
+
+        $keyiter = "\$\!$keyname\.polymod(2 xx *)";
+        $keyfrob = "\$\!$keyname +|= +?\$_ +< \$++;";
+        $p{$name}.p_attr =
+            "has \@\.$name\[" ~
+            (1 +< (NCsizetype($keyparm.c_type) * 8))
+            ~ '];';
+        $p{$keyname}.p2c_init = "\$!$keyname = 0;\n";
+    }
+    else {!!!}
+    $p{$name}.c_attr = "# Dynamic array $name sparsed by bits in $keyname";
+    $p{$name}.p2c_code = "\@bufs.append: .bufs if .defined for \@\!$name;";
+    $p{$name}.c2p_code = qq:to<EOKI>;
+        @args.append: \:$name\[(for $keyiter \{
+            if (\$_) \{
+        {c2p_parse_dynamic(params.new(:parent($p)), $type).indent(8)}
+            }
+            else \{
+                Nil
+            }
+        })];
+        EOKI
+    $p{$keyname}.c2p_arg = "# $keyname bitmaps definedness of \@\.$name.keys";
+    $p{$keyname}.p2c_init ~= qq:to<EOKP>;
+        for \$p6\.$name\.map(*.defined) \{
+            $keyfrob
+        };
+        EOKP
+}
+
 sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw") {
     given ($f.isa(XML::Comment) ?? "pad" !! $f.name) {
         my $name = $f.can("attribs") ?? $f.attribs<name> !! $_;
@@ -616,15 +862,18 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                 %quirks{$type}($p, :$padnum);
                 succeed
             }
-            my $offset = +$p.params ?? $p.params[*-1].c_offset !! $p.init_offset;
+            my $offset =
+                +$p.params ?? $p.params[*-1].c_offset !! $p.init_offset;
             my $align = c_alignment_rules($p);
 
+	    $p{$name}.c_type = NCtype($type);
             $p{$name}.c_attr = "has {NCtype($type)} \$.$name$rw;";
             $p{$name}.p_attr = "has \$.$name is rw;";
 
             if %cstructs{$type}:exists and not %embeddable{$type} {
 		$dynsize = True;
             }
+
             if $dynsize {
                 $p{$name}.c_attr =
                     "# $type \$.$name outside cstruct";
@@ -652,8 +901,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                     $p{$name}.c2p_code = qq:to<EOPC>;
                         @args.append:
                             "$name",
-                            $pptype\.new(Pointer.new(\$p + \$oleft - \$left),
-                                         :\$left, :!free);
+                        {c2p_parse_dynamic($p, $pptype)}
                         EOPC
                     $p{$name}.p2c_code = qq:to<EOPI>;
                         # TODO: dwimmery
@@ -683,7 +931,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                             }
                             \$buf := Pointer[uint8].new(\$buf + \$offset);
                             \$buf := nativecast(CArray[uint8], \$buf);
-                            my \$cs := do given {$pptype}::cstruct.new \{ .nativize(\$p6.$name); \$_ };
+                            my \$cs := do given \$p6.$name.WHO<cstruct>.new \{ .nativize(\$p6.$name); \$_ };
                             \$buf[^nativesizeof(\$\!$name)] = nativecast(CArray[uint8],\$cs)[^nativesizeof(\$\!$name)];
                         }
                         EOPI
@@ -705,22 +953,17 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                     $p{$name}.c2p_code = qq:to<EOPC>;
                         @args.append:
                             "$name",
-                            (if \$left >= wiresize({NCtype($type)}) \{
-                                LEAVE \{ \$left -= wiresize({NCtype($type)}); }
-                                # Strange incantation necessary
-                                nativecast(Pointer[{NCtype($type)}], Pointer.new(\$p + \$oleft - \$left)).deref
-                             }
-                             else \{ die "Short Packet" }
-                            );
+                        {c2p_parse_dynamic($p, $type)}
                         EOPC
                 }
             }
-            if $f.name eq "exprfield" {
+            if $f.name eq "exprfield" { # maybe use %quirks for this
                 # Fake it.  There is only one of these in the whole batch.
                 $p<odd_length>.p2c_init = '$!odd_length = +@.string +& 1;';
                 $p<odd_length>.p_attr = |();
                 $p<odd_length>.c2p_arg = |();
-                $p<string>.c2p_code = "# TODOP6 length * 2 - odd_length";
+                $p<odd_length>.c2p_code =
+                    "# XXX need to use \$odd_length to decide whether last CHAR2B is half";
             }
             $p{$name}.c_offset = $offset;
         }
@@ -746,7 +989,19 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                 $f.elements».name.join(" ") ne any <fieldref value> {
                 $dynsize = True;
                 my $eq;
-                if +$f.elements {
+
+                if $f.elements == 1 and +$f.elements(:TAG<popcount>) {
+		    if +$f.elements[0].elements == 1 and
+                       +$f.elements[0].elements(:TAG<fieldref>) {
+                        MakeSparseArray($p, $name, $type,
+                                        $f.elements[0].elements[0])
+                    }
+                    else {
+                        $p{$name}.p_attr = "# TODOP6: unknown popcount formulation";
+                    }
+                    succeed
+                }
+                elsif +$f.elements {
                     $eq = build_equation($f);
                 }
                 else {
@@ -1265,7 +1520,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
             # enum of the mask bit values.  So we fix this up.
             my %vpmap = (
                 :CreateWindow<CW>, :ChangeWindowAttributes<CW>,
-                :SetAttributes<CW>, :ConfigureWindow<ConfigWindow>,
+                :SetAttributes<xproto:CW>, :ConfigureWindow<ConfigWindow>,
                 :CreateGC<GC>, :ChangeGC<GC>, :ChangeKeyboardControl<KB>,
                 :PrintInputSelected<EvMask>, :PrintSelectInput<EvMask>,
                 :CreatePicture<CP>, :ChangePicture<CP>
@@ -1280,8 +1535,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                 succeed;
             }
             my $enum = %vpmap{$parent};
-            # TODO if anything uses enums from an include;
-            my $renum = %EnumRemap.pairs.first({$_.key ~~ /.*\s$enum/});
+            my $renum = mod.renum($f, $enum);
             my $type = $f.attribs<value-mask-type>;
             my $name = $f.attribs<value-mask-name>;
             my $pname = $f.attribs<value-list-name>;
@@ -1295,19 +1549,19 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                 # Perl6 object does not need attribute for $name
                 constant {$name}___maxof =
                     2 ** (wiresize({NCtype($type)}) * 8) - 1;
-                has Any \%.$pname\{{$renum.value}Enum\::{$renum.value}} is rw;
+                has Any \%.$pname\{{$renum}Enum\::{$renum}} is rw;
                 EOPT
             $p{$name}.p2c_code = qq:to<EOPC>;
                 \{
                     my \$b;
                     loop (\$b = 1; \$b < {$name}___maxof; \$b +<= 1) \{
-                        last if \%.$pname\{{$renum.value}Enum\::{$renum.value}(\$b)}:exists;
+                        last if \%.$pname\{{$renum}Enum\::{$renum}(\$b)}:exists;
                     }
                     if \$b < {$name}___maxof \{
                         @bufs.push: Buf[uint32].new(
                             (loop (\$b = 1; \$b < {$name}___maxof; \$b +<= 1) \{
-                                if \%.$pname\{{$renum.value}Enum\::{$renum.value}(\$b)}:exists \{
-                                    (+\%.$pname\{{$renum.value}Enum\::{$renum.value}(\$b)}) +& 0xffffffff;
+                                if \%.$pname\{{$renum}Enum\::{$renum}(\$b)}:exists \{
+                                    (+\%.$pname\{{$renum}Enum\::{$renum}(\$b)}) +& 0xffffffff;
                                 }
                              }))
                     }
@@ -1318,7 +1572,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                 \{
                     my \$b = 1;
                     while \$b < {$name}___maxof \{
-                            \$\!{$name} +|= \$b if \$p6.$pname\{{$renum.value}Enum\::{$renum.value}(\$b)}:exists;
+                            \$\!{$name} +|= \$b if \$p6.$pname\{{$renum}Enum\::{$renum}(\$b)}:exists;
                             \$b +<= 1;
                     };
                 }
@@ -1334,8 +1588,8 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
             my $parent = $f.parent;
             my @types = ($parent.elements(:name($_))[0].attribs<type> for @names);
             my $enum = $f.elements(:TAG<bitcase>)[0].elements(:TAG<enumref>)[0].attribs<ref>;
-            # TODO if anything uses enums from an include;
-            my $renum = %EnumRemap.pairs.first({$_.key ~~ /.*\s$enum/});
+
+            my $renum = mod.renum($f, $enum);
             my %nots;
             my $formula;
             my $formula_c;
@@ -1418,7 +1672,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                     \{
                         my \$b = 1;
                         while \$b < {$name}___maxof \{
-                            \$\!{$name} +|= \$b if \$p6.$name\{{$renum.value}Enum\::{$renum.value}(\$b)}:exists;
+                            \$\!{$name} +|= \$b if \$p6.$name\{{$renum}Enum\::{$renum}(\$b)}:exists;
                             \$b +<= 1;
                         };
                     }
@@ -1428,21 +1682,21 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                     constant {$name}___maxof =
                         2 ** (wiresize({NCtype($type)}) * 8) - 1;
                     # We would like to use a parameterized SetHash here.
-                    has Bool \%.$name\{{$renum.value}Enum\::{$renum.value}} is rw;
+                    has Bool \%.$name\{{$renum}Enum\::{$renum}} is rw;
                     EOPT
                 }
                 else {
                     $p{$name}.p_attr = qq:to<EOPT>;
                     constant {$name}___maxof =
                         2 ** (wiresize({NCtype($type)}) * 8) - 1;
-                    has \%.$name\{{$renum.value}Enum\::{$renum.value}} is rw;
+                    has \%.$name\{{$renum}Enum\::{$renum}} is rw;
                     EOPT
                 }
             }
 
             # Now build the list of optional fields
 	    my $cases = bitswitch.new(:xml($f));
-            MakeCases($cases);
+            MakeCases($cases, params.new(:parent($p)));
             $p{$pname}.p_subclasses = $cases.p6classes;
 
             $p{@names[0]}.p2c_code = qq:to<EOPC>;
@@ -1454,12 +1708,12 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                     loop (\$b = 1; \$b < \$formbits; \$b +<= 1) \{
                         next unless \$b +& \$f;
                         for @names.grep({not %nots{$_}}).map({'$%.' ~ $_}).join(", ") \{
-                            if \$_\{{$renum.value}Enum\::{$renum.value}(\$b)}:exists \{
-                                die "Must be of type \{self.{$pname}_typemap\{\{{$renum.value}Enum\::{$renum.value}(\$b)}}.^name}"
-                                    unless (\$_\{{$renum.value}Enum\::{$renum.value}(\$b)}.isa(
-                                       self.{$pname}_typemap\{{$renum.value}Enum\::{$renum.value}(\$b)})
+                            if \$_\{{$renum}Enum\::{$renum}(\$b)}:exists \{
+                                die "Must be of type \{self.{$pname}_typemap\{\{{$renum}Enum\::{$renum}(\$b)}}.^name}"
+                                    unless (\$_\{{$renum}Enum\::{$renum}(\$b)}.isa(
+                                       self.{$pname}_typemap\{{$renum}Enum\::{$renum}(\$b)})
                                     );
-                                @bufs.append: \$_\{{$renum.value}Enum\::{$renum.value}(\$b)}.bufs;
+                                @bufs.append: \$_\{{$renum}Enum\::{$renum}(\$b)}.bufs;
                                 last;
                             }
                         }
@@ -1468,18 +1722,18 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                 EOPC
 
 
+            # TODO: multiple present fields... but nothing uses them
             $p{@names[0]}.c2p_code = qq:to<EOPC>;
                 \{
                     my constant \$formbits = (1 +< (max ({@types.map({NCtype($_)}).join(", ")}).map: \{ 8 * wiresize(\$_) })) - 1;
                     my \$f = $formula_c;
 
                     my \$b;
-                    # TODO: multiple present fields... but nothing uses them
                     @args.append: "{@names[0]}", Hash[Any,Any].new(
                         (loop (\$b = 1; \$b < \$formbits; \$b +<= 1) \{
                             next unless \$b +& \$f;
-                            \$_\{{$renum.value}Enum\::{$renum.value}(\$b)} =>
-                                \$pstruct.{$pname}_typemap\{{$renum.value}Enum\::{$renum.value}(\$b)}.new(
+                            \$_\{{$renum}Enum\::{$renum}(\$b)} =>
+                                \$pstruct.{$pname}_typemap\{{$renum}Enum\::{$renum}(\$b)}.new(
                                     Pointer.new(\$p + \$oleft - \$left), :\$left, :!free
                                 )
                         }))
@@ -1694,6 +1948,7 @@ sub MakeErrors2($mod) {
         $clname = $clname.lc.tc if $clname ~~ /^<upper>+$/;
         $mod.errors{$number} = $oname ~ $clname ~ "Error";
         %cstructs{$oname ~ $error.attribs<name>} = $clname;
+        %cstructs{$clname} = $clname;
 
         my $mcode;
         if not $oname and $error.attribs<name> eq "Request" {
@@ -1763,7 +2018,7 @@ sub MakeEvents($mod) {
         for $event.elements -> $e {
             if $event.elements(:TAG<doc>) -> [ $doc ] {
                  if $doc.elements(:TAG<field>).grep(
-                     {$e.attribs<name>:exists and 
+                     {$e.attribs<name>:exists and
                       $_.attribs<name> eq $e.attribs<name>}) -> [ $fdoc ] {
                      my $docstr =
                          ("#| $_" for $fdoc.cdata».data».Str.lines).join("\n");
@@ -1785,6 +2040,7 @@ sub MakeEvents2($mod) {
         my params $p;
         my $padnum = -1;
         my $ename = $event.attribs<name>;
+        my $prestruct = "";
 
         next without %eventcopies{$oname ~ $ename}; # Remove this after XGE events implemented
 
@@ -1797,13 +2053,9 @@ sub MakeEvents2($mod) {
         }
         my $number = $event.attribs<number>;
 
-        if %ClassMultiplex{$mod.cname ~ ":" ~ $ename} -> $multiplex {
-            (my $mxu, my $mxi) = $multiplex.split(":");
-            $p{$mxi}.p2c_init = "\$\!$mxi = +\$p6.$mxu;";
-            $p{$mxu}.p2c_init = "\$\!$mxu\.\"set_\{\$p6.^name.split(\"::\")[*-1]}\"(\$p6.$mxu\.cstruct.new.nativize(\$p6.$mxu));";
-            $p{$mxi}.p_attr = |();
-            my $uname = %ClassOcclude{$mod.cname ~ ":" ~ $ename};
-            $p{$mxu}.c2p_arg ~~ s/$uname/$uname\(\$\.$mxi\)/;
+        if $mod.occludes.first(*.envelope eq $ename ~ "Event") -> $o {
+            $o.fixparams($p);
+	    $prestruct = $o.cstruct;
         }
 
         my $lift = 'has uint8 $.event_code is rw;';
@@ -1845,11 +2097,13 @@ sub MakeEvents2($mod) {
         $clname = $clname.lc.tc if $clname ~~ /^<upper>+$/;
         $mod.events{$number} = $oname ~ $clname ~ "Event";
         %cstructs{$oname ~ $event.attribs<name>} = $clname;
+        %cstructs{$clname} = $clname;
 
         my @doc;
         @doc.append(MakeClassDocs($event, $clname));
 
         @p6classes.push(qq:to<EO6C>);
+            $prestruct
             {@doc.join("\n")}
             our class {$oname}{$clname}Event does Event[$number] is export(:DEFAULT, :events) \{
                 my \$.event_code = $number; # without the extension base number
@@ -1873,22 +2127,22 @@ sub MakeEvents2($mod) {
 # Temporary, to cull TODOP6s
 my %GoodReqs = :Nil(1);
 
-sub MakeCases($bitswitch) {
+sub MakeCases($bitswitch, $pp) {
     my @cstructs;
     my @p6classes;
     my @casemap;
     my $pname = $bitswitch.xml.attribs<name>;
 
     for $bitswitch.xml.elements(:TAG<bitcase>) -> $bitcase {
+        my params $p .= new(:parent($pp));
         my $cstruct = "";
         my @p6fields;
         my $p6assigns = "";
         my $p6args = "";
         my $padnum = -1;
         my @reqfields;
-        my params $p .= new;
         my $dynsize = 0;
-        my $roles = "";
+        my $roles = " does MonoStruct";
         my $enumref = $bitcase.elements(:TAG<enumref>)[0];
 
         for $bitcase.elements -> $e {
@@ -1899,7 +2153,7 @@ sub MakeCases($bitswitch) {
             next if $e.name eq "enumref";
             if $bitcase.elements(:TAG<doc>) -> [ $doc ] {
                 if $doc.elements(:TAG<field>).grep(
-                    {$e.attribs<name>:exists and 
+                    {$e.attribs<name>:exists and
                         $_.attribs<name> eq $e.attribs<name>}) -> [ $fdoc ] {
                     my $docstr =
                         ("#| $_" for $fdoc.cdata».data».Str.lines).join("\n");
@@ -1937,8 +2191,11 @@ sub MakeCases($bitswitch) {
                 }
             EONC
 
-        my $ename = $enumref.attribs<ref> ~ "Enum::" ~ $enumref.contents.Str;
-        my $clname = $pname ~ "::" ~ $enumref.attribs<ref> ~ "::" ~ $enumref.contents.Str;
+        my $enum = $enumref.attribs<ref>;
+        my $renum = mod.renum($enumref, $enum);
+        my $renumv = mod.renumv($enumref, $enum, $enumref.contents.Str);
+        my $ename = $renum ~ "Enum::" ~ $renumv;
+        my $clname = $pname ~ "::" ~ $renum ~ "::" ~ $renumv;
 
         my @doc;
         @doc.append(MakeClassDocs($bitcase, $clname));
@@ -1998,7 +2255,9 @@ sub MakeStructs($mod) {
         my @reqfields;
         my params $p .= new;
         my $dynsize = 0;
-        my $roles = "";
+        my $roles = " does MonoStruct";
+        my $morphstructor = ""; # Replace normal .new if a generic
+        my $prestruct = "";
 
         for $struct.nodes -> $e {
             MakeCStructField($p, $e, $padnum, $dynsize)
@@ -2016,6 +2275,44 @@ sub MakeStructs($mod) {
                             if $p{$e.attribs<name>}.p_attr !~~ /^\#/;
                      $p{$e.attribs<name>}.c_doc = $docstr;
                  }
+            }
+        }
+	if $mod.occludes.first(*.envelope eq $struct.attribs<name>) -> $o {
+            $o.fixparams($p);
+	    $prestruct = $o.cstruct;
+        }
+	if $mod.occludes.first(*.generic eq $struct.attribs<name>) -> $o {
+            $morphstructor = $o.morphstructor;
+        }
+
+        my $clname = $struct.attribs<name>.Str;
+        $clname = $clname.lc.tc if $clname ~~ /^<upper>+$/;
+        $clname = (given $clname {
+            when "Str" { "String" }
+            when "Notify" { "{$oname}Notify" }
+            when "Modeinfo" { "{$oname}Modeinfo" }
+            when "Format" { "{$oname}Format" }
+            when "Event" { "{$oname}Event" }
+            when "INT64" { "Counter64" }
+            default    { $_  }
+        });
+        my $n = $struct.attribs<name>;
+        %cstructs{$n} = $clname;
+        %cstructs{$clname} = $clname;
+        while %cstructs{$n}:exists {
+            %embeddable{$n} = True unless $dynsize;
+            last if $n eq %cstructs{$n} or $++ > 20;
+	    $n = %cstructs{$n};
+        }
+
+        if $mod.occlude{$struct.attribs<name>} {
+            $roles = $mod.occlude{$struct.attribs<name>};
+            # recover role name... this could be less cheezy
+            $mod.occlude{$struct.attribs<name>} ~~ /\s(\w+)'['/;
+            my $rname = $/[0];
+            given $mod.occludes.first(*.class eq $rname) {
+                .cattrs.push($clname);
+                .fixparams($p, :subclass($clname));
             }
         }
 
@@ -2046,38 +2343,12 @@ sub MakeStructs($mod) {
                 }
             EONC
 
-        my $clname = $struct.attribs<name>.Str;
-        $clname = $clname.lc.tc if $clname ~~ /^<upper>+$/;
-        $clname = (given $clname {
-            when "Str" { "String" }
-            when "Notify" { "{$oname}Notify" }
-            when "Modeinfo" { "{$oname}Modeinfo" }
-            when "Format" { "{$oname}Format" }
-            when "Event" { "{$oname}Event" }
-            when "INT64" { "Counter64" }
-            default    { $_  }
-        });
-        my $n = $struct.attribs<name>;
-        %cstructs{$n} = $clname;
-        while %cstructs{$n}:exists {
-            %embeddable{$n} = True unless $dynsize;
-            last if $n eq %cstructs{$n} or $++ > 20;
-	    $n = %cstructs{$n};
-        }
-
-        if $mod.occlude{$struct.attribs<name>} {
-            $roles ~= $mod.occlude{$struct.attribs<name>};
-            # recover role name... this could be less cheezy
-            $mod.occlude{$struct.attribs<name>} ~~ /\s(\w+)'['/;
-            my $rname = $/[0];
-            $mod.rolecstruct{$rname}.push($clname);
-        }
-
         my @doc;
         @doc.append(MakeClassDocs($struct, $clname));
 
-        my $optnew = $p.params».c2p_code.elems ?? "" !! qq:to<EO6O>;
-
+        my $optnew = "";
+        unless ($p.params».c2p_code.elems or $morphstructor) {
+            $optnew = $p.params».c2p_code.elems ?? "" !! qq:to<EO6O>;
                 # Optimize leaf nodes, since there can be tens of thousands
                 multi method new (Pointer \$p, Int :\$left! is rw, Bool :\$free = True) \{
                     my \$cs = nativecast(cstruct, \$p);
@@ -2088,8 +2359,11 @@ sub MakeStructs($mod) {
                     \$res;
                 }
             EO6O
+        }
 
         @p6classes.push(qq:to<EO6C>);
+            $prestruct
+
             {@doc.join("\n")}
             our class {$clname} does Struct$roles is export(:DEFAULT, :structs) \{
 
@@ -2098,6 +2372,8 @@ sub MakeStructs($mod) {
                 { @cstructs[*-1] }
 
             {({ |(.p_doc, .p_attr) } for $p.params).join("\n").indent(4)}
+
+            { $morphstructor.indent(4) }
 
             { makemeth_child_bufs($p, :indent(4)) }
 
@@ -2158,8 +2434,6 @@ sub MakeStructs($mod) {
     }
     $mod.cstructs.append(@cstructs);
     $mod.p6classes.append(@p6classes);
-
-
 }
 
 sub MakeReplies($mod) {
@@ -2499,15 +2773,16 @@ sub Output ($mod) {
     $out.print($mod.typedefs.join);
     $out.print($mod.p6classes.grep({$_ !~~ /TODOP6/}).join);
 
-    for $mod.rolecstruct.kv -> $rname, $ratt {
-        $out.print(
-            "class {$rname}::cstruct \{\n" ~
-            (qq:to<EOAT> for |$ratt).join("\n").indent(4) ~ "\n}\n";
-                HAS $_\:\:cstruct \$\.$_;
-                sub set_$_ ($_\:\:cstruct \$it) \{ \$\!$_ := \$it }
-                EOAT
-        )
-    }
+#    for $mod.rolecstruct.kv -> $rname, $ratt {
+#        $out.print(
+#            "class {$rname}::cstruct \{ # is repr('CStruct') from stub above\n"
+#            ~
+#            (qq:to<EOAT> for |$ratt).join("\n").indent(4) ~ "\n}\n";
+#                HAS $_\:\:cstruct \$\.$_;
+#                sub set_$_ ($_\:\:cstruct \$it) \{ \$\!$_ := \$it }
+#                EOAT
+#        )
+#    }
 
     $out.print($mod.epilogue);
 
