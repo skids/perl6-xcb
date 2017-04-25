@@ -533,6 +533,8 @@ our role MonoStruct is export(:internal) {
     }
 }
 
+our class MonoStructClass does MonoStruct is export(:internal) { }
+
 our role Struct is export(:internal) {
 
     method cstruct {...}

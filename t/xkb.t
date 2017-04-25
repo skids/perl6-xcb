@@ -3,8 +3,7 @@ use lib <blib/lib lib>;
 
 use Test;
 
-plan 34;
-
+plan 69;
 
 use X11;
 use X11::XCB::xkb;
@@ -56,18 +55,62 @@ is &Action(20), SADeviceValuator, "Action coercer with Int";
 is &Action(SADeviceValuator), SADeviceValuator, "Action coercer idempotence";
 is &Action()[0].gist, Pair.new("0",SANoAction).gist, "Action list works";
 
-#my $c = Connection.new;
-#my $sir = xkbSelectInputRequest.new(:window($c.roots[0].root), :enable(1 +< +ResourceChange));
-#$sir.perl.say;
-#$sir.send($c);
-
-#sleep 10;
-
-#my $c = Connection.new;
-#my $gdi = GetDeviceInfoRequest.new(:deviceSpec<IDEnum::UseCoreKbd>);
-#ok $gdi.isa(GetDeviceInfoRequest), "Made a GetDeviceInfoRequest";
-
-#my $cookie = $gdi.send($c);
-#my $res = await($cookie).receive;
-
-#$res.perl.say
+is Behavior::cstruct.wiresize, 2, "Behavior CUnion has correct wiresize";
+is CommonBehavior.cstruct.wiresize, 2, "CommonBehavior generic has correct wiresize";
+$ev = CArray[uint8].new(0,2);
+$p = nativecast(Pointer[uint8], $ev);
+$left = 2;
+$n = CommonBehavior.new($p, :$left, :!free);
+ok  $n.isa(DefaultBehavior), "Made a DefaultBehavior from bytes (CommonBehavior.new)";
+ok $left == 0, "DefaultBehavior construction subtracted correct length";
+for -1..1 {
+    $left = $_;
+    dies-ok -> {Behavior.new($p, :$left, :!free)}, "Behavior short/bad length $_ detected";
+}
+$left = 2;
+$n = Behavior.new($p, :$left, :!free);
+ok  $n.isa(DefaultBehavior), "Made a DefaultBehavior from bytes (Behavior.new)";
+ok $left == 0, "DefaultBehavior construction subtracted correct length";
+for -1..1 {
+    $left = $_;
+    dies-ok -> {Behavior.new($p, :$left, :!free)}, "Behavior short/bad length $_ detected";
+}
+is +DefaultBehavior, 0, "PermanentLockBehavior numifies to its subcode";
+$ev = CArray[uint8].new(1,2); $p = nativecast(Pointer[uint8], $ev);
+$left = 2;
+$n = CommonBehavior.new($p, :$left, :!free);
+ok  $n.isa(LockBehavior), "Made a LockBehavior from bytes (CommonBehavior.new)";
+ok  $n.does(Behavior), "LockBehavior does Behavior";
+$left = 2;
+$n = Behavior.new($p, :$left, :!free);
+ok  $n.isa(LockBehavior), "Made a LockBehavior from bytes (Behavior.new)";
+is +LockBehavior, 1, "LockBehavior numifies to its subcode";
+$ev = CArray[uint8].new(129,2); $p = nativecast(Pointer[uint8], $ev);
+$left = 2;
+$n = CommonBehavior.new($p, :$left, :!free);
+ok  $n.isa(PermamentLockBehavior), "Made a PermamentLockBehavior (sic) from bytes (CommonBehavior.new)";
+ok  $n.does(Behavior), "PermamentLockBehavior (sic) does Behavior";
+$left = 2;
+$n = Behavior.new($p, :$left, :!free);
+ok  $n.isa(PermamentLockBehavior), "Made a PermamentLockBehavior (sic) from bytes (Behavior.new)";
+is +PermamentLockBehavior, 129, "PermamentLockBehavior (sic) numifies to its subcode";
+$ev = CArray[uint8].new(3,42); $p = nativecast(Pointer[uint8], $ev);
+$left = 2;
+$n = CommonBehavior.new($p, :$left, :!free);
+ok  $n.isa(Overlay1Behavior), "Made a Overlay1Behavior from bytes (CommonBehavior.new)";
+ok  $n.does(OverlayBehavior), "Overlay1Behavior does OverlayBehavior";
+ok  $n.does(Behavior), "Overlay1Behavior does Behavior";
+$left = 2;
+$n = Behavior.new($p, :$left, :!free);
+ok  $n.isa(Overlay1Behavior), "Made a Overlay1Behavior from bytes (Behavior.new)";
+is $n.key, 42, "Overlay1Behavior has correct .key";
+is +Overlay1Behavior, 3, "Overlay1Behavior numifies to its subcode";
+$o = PermamentOverlay1Behavior.new(:43key);
+ok $o.isa(PermamentOverlay1Behavior), "Made an PermamentOverlay1Behavior (sic) by hand";
+ok  $o.does(PermamentOverlayBehavior), "PermamentOverlay1Behavior (sic) does PermamentOverlayBehavior";
+ok  $o.does(Behavior), "PermamentOverlay1Behavior (sic) does Behavior";
+is $o.key, 43, "Hand made PermamentOverlay1Behavior all fields have expected values";
+is (|(.values for $o.bufs)).flat[^2], (131,43), "Hand made PermamentOverlay1Behavior serializes to correct bytes";
+is &Behavior(130), PermamentRadioGroupBehavior, "PermamentRadioGroupBehavior coercer with Int";
+is &Behavior(PermamentRadioGroupBehavior), PermamentRadioGroupBehavior, "Behavior coercer idempotence";
+is &Behavior()[1].gist, Pair.new("1",LockBehavior).gist, "Behavior list works";

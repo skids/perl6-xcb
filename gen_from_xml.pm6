@@ -69,6 +69,23 @@ my sub c_alignment_rules($p) {
     ).max;
 }
 
+# How to translate an occluded enum and its class to perl6 code,
+class ocmunge {
+    has $.cname;                  # name of the class
+    has $.cstruct;                # which role $.cstruct to use
+    # extra does when we are part of a ocrole (see below)
+    has $.sharedrole = $!cstruct eq $!cname ?? "" !! $!cstruct;
+    has $.prole_name;             # paramtric role for occlude
+    has $.prole_val;              # value to paramterize it with
+}
+
+# A role shared by multiple union members.
+class ocrole {
+    has $.name;
+    has ocmunge @.users is rw;
+    has $.done is rw = False;
+}
+
 # For unions where variants are selected by an enum, we occlude
 # that enum behind a role/pun which causes variant type
 # objects to numify into their corresponding enum value.
@@ -88,14 +105,23 @@ class occlude {
     has $.typer;   # Field in $.envelope used to decide which subtype to use
     has $.typee;   # Field in $.envelope with union body or remainder therof
     has $.enum;    # Name of enum used in $.typer to choose types
-    has &.toenum = { $_ };  # converts subtype names to enum values
-    has &.totype = { $_ };  # converts enum values to subtype names
+    has &.toenum = { $_ };   # converts subtype names to enum values
+    has &.totype = { $_ };   # converts enum values to subtype names
+    has &.torole = &!totype; # converts enum values to shared union subtypes
     has @.cattrs is rw;
+    has $.needs_cstruct = "";
+    has $.cstruct_done = False;
+    has $.typermask = 0xff;  # Workaround for broken unsigned natives
 
     method cstruct {
-        "class {$.class}::cstruct does cpacking \{ # is repr('CUnion') from stub above\n"
+        return "" if $!cstruct_done;
+        $!cstruct_done = True;
+
+        $!needs_cstruct
         ~
-        ("HAS $_\:\:cstruct \$\.$_;" for @.cattrs).join("\n").indent(4)
+        "class {$.class}::cstruct does cpacking is repr('CUnion') \{\n"
+        ~
+        ("HAS $_\:\:cstruct \$\.$_;" for @!cattrs).join("\n").indent(4)
         ~
         q:to<EOWS>
 
@@ -108,20 +134,35 @@ class occlude {
     }
 
     # Generate map of subtype names to does clauses to add to them.
+    # While we are at it, harvest the subtype names for the cstruct.
     method doeses($enum) {
         my %res;
-
-        (for $enum.elements(:TAG<item>) -> $item {
+        for $enum.elements(:TAG<item>) -> $item {
             my $v = $item.elements[0];
-            my $n = $item.attribs<name>;
+            my $r = &!torole($item.attribs<name>);
+            my $n = &!totype($item.attribs<name>);
+            @!cattrs.push($n);
             if $v.name eq "bit" {
                 $v = 1 +< $v.nodes[0].text;
             }
             else {
                 $v = $v.nodes[0].text;
             }
-            (&.totype)($n) => " does $.class\[$v]";
-        })
+            my $obj = ocmunge.new(
+                :cname($n), :cstruct($r),
+                :prole_name($.class), :prole_val($v)
+            );
+            if ($r ne $n and %res{$r}:exists) {
+                %res{$r}.users.push($obj);
+            }
+            elsif ($r ne $n) {
+                %res{$r} = ocrole.new(:name($r), :users($obj));
+            }
+            else {
+                %res{$n} = $obj;
+            }
+        }
+	%res
     }
 
     # Generate the glue code implementing the guts of the role
@@ -132,6 +173,7 @@ class occlude {
         my $does = "";
 
         %embeddable{$.generic} = True; # A bit hacky to do this here
+        %embeddable{$.class} = True;
 
         if $.envelope eq $.generic {
             $morph = self.morphstructor;
@@ -166,8 +208,6 @@ class occlude {
                 \%$rname.sort.list;
             }
 
-            class {$rname}::cstruct is repr("CUnion") \{...}
-
             EOOC
 
     }
@@ -175,6 +215,8 @@ class occlude {
     method fixparams (params $p is rw, :$subclass?) {
         if $.envelope =:= $.generic {
             if $subclass.defined {
+                $p{$.typer}.p_attr = |();
+                $p{$.typer}.c2p_arg = |();
                 $p{$.typer}.p2c_init = "\$\!$.typer = +\$p6.WHAT;";
                 return;
             }
@@ -193,13 +235,15 @@ class occlude {
     }
 
     method morphstructor () {
+        my $primerstruct = $.generic =:= $.class ??
+           '::?CLASS.WHO<cstruct>' !! "$.generic\.cstruct";
         qq:to<EOCC>;
             multi method new (Pointer \$p, Int :\$left! is rw, Bool :\$free = True) \{
-                my \$to = \:\:\?CLASS.WHO<cstruct>;
+                my \$to = $primerstruct;
                 # We assume typer is not in a dynamic part of the struct
                 my \$cs = nativecast(\$to, \$p);
                 fail("Short packet.") unless \$left >= \$to.wiresize;
-                my \$variant = \%$.class\{\$cs.$.typer};
+                my \$variant = \%$.class\{\$cs.$.typer +& $.typermask};
 		\$variant.new(\$p, :\$left, :\$free);
             }
 
@@ -209,19 +253,26 @@ class occlude {
 
 # This part has to be done by hand... information for each
 # self-multiplexed union in each module
-my %Occludes is default(|()) =
+my %Occludes is default(|());
+%Occludes.append:
     "randr" => ( occlude.new(:generic<NotifyData>, :class<NotifyData>,
                              :envelope<NotifyEvent>,
                              :typer<subCode>, :typee<u>, :enum<Notify>)
                ),
     "xkb"   => ( occlude.new(:generic<SIAction>, :class<Action>,
                              :typer<type>, :typee<data>, :enum<SAType>,
-                             :toenum({ $_ ~~ /^SA(.*)$/; $/[0].Str}),
-                             :totype({ "SA$_" }))
+                             :toenum({ $_ ~~ /^SA(.*)$/; my $it = $/[0].Str; $it ~~ s/IsoLock/ISOLock/; $it }),
+                             :totype({ $_ ~~ s/ISOLock/IsoLock/; "SA$_" }))
+               ),
+    "xkb"   => ( occlude.new(:generic<CommonBehavior>, :class<Behavior>,
+                             :typer<type>, :typee<data>, :enum<BehaviorType>,
+                             :toenum({ $_ ~~ /^(.*?)Behavior$/; $/[0].Str}),
+                             :torole({ $_ ~~ /(.*?)\d*$/; $/[0] ~ "Behavior" }),
+                             :totype({ $_ ~ "Behavior" }))
                )
     # TODO
     # XInput: InputClass Feedbackclass DeviceControl DeviceClassType maybe more
-    # xkb: EventType DoodadType Behavior(undo current first cut) and maybe more
+    # xkb: EventType DoodadType and maybe more
     # ...and retool event enums everywhere to act similarly
 ;
 
@@ -243,14 +294,14 @@ class mod {
     has %.opcodes is rw;
     has %.errors is rw;
     has %.events is rw;
-    has %.occlude is rw; # resulting code of occlusions
-    has @.occludes is rw;
+    has %.occlude is rw;  # resulting munges for occlusions
+    has @.occludes is rw; # tweaks for occluding certain enums
     has Array %.rolecstruct is rw;
 
     my @.allmods; # Global state: instances of this class
 
     method new (|c) {
-        my $res = self.bless(:occludes(%Occludes{c<cname>,}), |c);
+        my $res = self.bless(:occludes(|%Occludes{c<cname>}), |c);
         @.allmods.push($res);
         $res;
     }
@@ -435,7 +486,7 @@ sub makemeth_child_structs(params $p, :$indent = 0) {
 }
 
 # Special quirks and workarounds
-my %quirks = "ClientMessageData" => &makeClientMessageData;
+my %quirks = "ClientMessageData" => &makeClientMessageData, "list:preserve_entries" => &makeParasiticList, "list:preserve" => &makeParasiticList;
 
 sub MakeMod ($xml) {
     my $outname;
@@ -526,7 +577,7 @@ sub MakeMod ($xml) {
             EOE
     }
 
-    mod.new(:xml($xmltree), :$outname, :$modname, :$extension
+    mod.new(:xml($xmltree), :$outname, :$modname, :$extension,
             :$xextension, :$cname, :$prologue);
 }
 
@@ -594,6 +645,7 @@ sub MakeTypeDefs ($mod) {
     for $mod.xml.root.elements(:TAG<typedef>) -> $e {
         %nctypemap{$e.attribs<newname>} = $e.attribs<oldname>;
         my $t = NCtype($e.attribs<oldname>);
+        # XXX figure this out without a manual list
         if ($e.attribs<newname> ~~ /Behavior|^SA/) {
             $mod.subclasses{$e.attribs<newname>} = $e.attribs<oldname>;
         }
@@ -740,6 +792,10 @@ sub MakeImports($for, @mods) {
         $res ~= "use X11::XCB::$from.modname() :internal, :DEFAULT;\n";
     }
     $for.prologue ~= $res;
+
+    for $for.occludes.grep({$_.generic !=:= $_.class}) {
+        $for.prologue ~= "class {$_.generic} \{...}\n"
+    }
 }
 
 multi sub build_op($f where {.name eq "op"}) {
@@ -776,7 +832,7 @@ sub build_equation($f) {
    build_op($f.elements[0]);
 }
 
-my %cstructs = "sync:INT64" => "Counter64", "Behavior" => "Behavior", "NotifyData" => "NotifyData";
+my %cstructs = "sync:INT64" => "Counter64", "Action" => "Action", "Behavior" => "Behavior", "NotifyData" => "NotifyData";
 
 sub c2p_parse_dynamic(params $p, $type) {
     if %cstructs{$type}:exists {
@@ -821,13 +877,11 @@ sub MakeSparseArray(params $p, $name, $type, $kfr) {
             $keyvar = "\$\!$keyname";
         }
 
-        $keyiter = "\$\!$keyname\.polymod(2 xx *)";
-        $keyfrob = "\$\!$keyname +|= +?\$_ +< \$++;";
+        $keyiter = "$keyvar\.polymod(2 xx *)";
+        $keyfrob = "$keyvar +|= +?\$_ +< \$++;";
         $p{$name}.p_attr =
-            "has \@\.$name\[" ~
-            (1 +< (NCsizetype($keyparm.c_type) * 8))
-            ~ '];';
-        $p{$keyname}.p2c_init = "\$!$keyname = 0;\n";
+            "has \@\.$name\[{(NCsizetype($keyparm.c_type) * 8)}];";
+        $p{$keyname}.p2c_init = "$keyvar = 0;\n";
     }
     else {!!!}
     $p{$name}.c_attr = "# Dynamic array $name sparsed by bits in $keyname";
@@ -859,7 +913,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
 
             # Deal with special mutant cases
             if %quirks{$type}:exists {
-                %quirks{$type}($p, :$padnum);
+                %quirks{$type}($p, $f, :$padnum);
                 succeed
             }
             my $offset =
@@ -1074,8 +1128,13 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                 }
                 elsif %cstructs{$type} -> $pt {
                     if $eq ~~ /pstruct\.<!before length<!alpha>>/ {
-                        $TODOP6++;
-                        $p{$name}.c_attr = "# Dynamic layout: {$type}s $TODOP6 fields other than .length";
+                        if %quirks{"list:$name"}:exists and %quirks{"list:$name"}($p, $f, :$padnum) {
+                            succeed
+                        }
+                        else {
+                            $TODOP6++;
+                            $p{$name}.c_attr = "# Dynamic layout: {$type}s $TODOP6 fields other than .length.";
+                        }
                     } else {
                         $p{$name}.c_attr = "# Dynamic layout: {$type}s";
                     }
@@ -2055,7 +2114,17 @@ sub MakeEvents2($mod) {
 
         if $mod.occludes.first(*.envelope eq $ename ~ "Event") -> $o {
             $o.fixparams($p);
-	    $prestruct = $o.cstruct;
+        }
+
+        my @HASoccludes = $p.params.map:
+            { if $_.c_attr ~~ /HAS.*?<ident>\:\:cstruct/ { $/<ident>.Str } };
+        if +@HASoccludes {
+            my @pendoccludes = $mod.occludes.grep(!*.cstruct_done).map(*.class);
+	    if @HASoccludes (&) @pendoccludes -> $got {
+                for $got.keys -> $do {
+                    $prestruct ~= $mod.occludes.first(*.class eq $do).cstruct;
+                }
+            }
         }
 
         my $lift = 'has uint8 $.event_code is rw;';
@@ -2257,7 +2326,7 @@ sub MakeStructs($mod) {
         my $dynsize = 0;
         my $roles = " does MonoStruct";
         my $morphstructor = ""; # Replace normal .new if a generic
-        my $prestruct = "";
+	my $prestruct = "";
 
         for $struct.nodes -> $e {
             MakeCStructField($p, $e, $padnum, $dynsize)
@@ -2277,9 +2346,19 @@ sub MakeStructs($mod) {
                  }
             }
         }
+        my @HASoccludes = $p.params.map:
+            { if $_.c_attr ~~ /HAS.*?<ident>\:\:cstruct/ { $/<ident>.Str } };
+        if +@HASoccludes {
+            my @pendoccludes = $mod.occludes.grep(!*.cstruct_done).map(*.class);
+	    if @HASoccludes (&) @pendoccludes -> $got {
+                for $got.keys -> $do {
+                    $prestruct ~= $mod.occludes.first(*.class eq $do).cstruct;
+                }
+            }
+        }
+
 	if $mod.occludes.first(*.envelope eq $struct.attribs<name>) -> $o {
             $o.fixparams($p);
-	    $prestruct = $o.cstruct;
         }
 	if $mod.occludes.first(*.generic eq $struct.attribs<name>) -> $o {
             $morphstructor = $o.morphstructor;
@@ -2305,16 +2384,122 @@ sub MakeStructs($mod) {
 	    $n = %cstructs{$n};
         }
 
-        if $mod.occlude{$struct.attribs<name>} {
-            $roles = $mod.occlude{$struct.attribs<name>};
-            # recover role name... this could be less cheezy
-            $mod.occlude{$struct.attribs<name>} ~~ /\s(\w+)'['/;
-            my $rname = $/[0];
-            given $mod.occludes.first(*.class eq $rname) {
-                .cattrs.push($clname);
-                .fixparams($p, :subclass($clname));
+        my sub resolvesubclass ($clname is copy) {
+            return "" unless $mod.subclasses{$clname};
+            while $mod.subclasses{$clname} -> $from { $clname = $from };
+	    $clname;
+        }
+
+        my @allsuchoccludes = $struct.attribs<name>,
+            |$mod.subclasses.grep({ resolvesubclass($_.key) eq $struct.attribs<name> }).map(*.key);
+
+        my $skiprest = 0;
+        for @allsuchoccludes.map({ $mod.occlude{$_} // |() }) -> $o {
+            once {
+                my $rname = $o.isa(ocrole) ?? $o.users[0].prole_name !! $o.prole_name;
+                $mod.occludes.first(*.class eq $rname).fixparams($p, :subclass($rname));
+            }
+            my @classes;
+            if ($o.isa(ocrole)) {
+                $skiprest = 1 if $o.name eq $struct.attribs<name>;
+                unless $o.done {
+                    @cstructs.push: qq:to<EORC>;
+                        class {$o.name}::cstruct does cpacking is repr("CStruct") \{
+
+                    {({ |(.c_doc, .c_attr) } for $p.params).join("\n").indent(8)}
+
+                            method Hash \{
+                               \{
+                    {$p.params».c2p_arg.join(",\n").indent(16)}
+                                }
+                            }
+                            method nativize(\$p6) \{
+                    {$p.params».p2c_init.join("\n").indent(12)}
+                            }
+                        };
+                    EORC
+                    # TODO docs
+                    @p6classes.push(qq:to<EOR6>);
+                        role {$o.name} \{
+                        {({ |(.p_doc, .p_attr) } for $p.params).join("\n").indent(4)}
+                        { makemeth_child_bufs($p, :indent(4)) }
+                        { makemeth_child_structs($p, :indent(4)) }
+                        }
+                        { @cstructs[*-1].indent(-4) }
+                        EOR6
+                    $o.done = True;
+                }
+                @classes = $o.users;
+            }
+            elsif $o.cname ne $struct.attribs<name> {
+                @cstructs.push: qq:to<EORC>;
+                        our class cstruct does cpacking is repr("CStruct") \{
+
+                        {({ |(.c_doc, .c_attr) } for $p.params).join("\n").indent(8)}
+
+                            method Hash \{
+                               \{
+                    {$p.params».c2p_arg.join(",\n").indent(16)}
+                                }
+                            }
+                            method nativize(\$p6) \{
+                    {$p.params».p2c_init.join("\n").indent(12)}
+                            }
+                        };
+                        my \$.cstruct = cstruct;
+                    EORC
+                @p6classes.push(qq:to<EO6C>);
+                    our class {$o.cname} does Struct is MonoStructClass does {$o.prole_name}\[{$o.prole_val}] is export(:DEFAULT, :structs) \{
+                    { @cstructs[*-1] }
+                    {({ |(.p_doc, .p_attr) } for $p.params).join("\n").indent(4)}
+                    { makemeth_child_bufs($p, :indent(4)) }
+                    { makemeth_child_structs($p, :indent(4)) }
+                    # Optimize leaf nodes, since there can be tens of thousands
+                        multi method new (Pointer \$p, Int :\$left! is rw, Bool :\$free = True) \{
+                            my \$cs = nativecast(cstruct, \$p);
+                            \$left -= cstruct.wiresize;
+                            fail("Short packet.") unless \$left >= 0;
+                            my \$res = self.bless(|\$cs.Hash);
+                            xcb_free \$p if \$free;
+                            \$res;
+                        }
+                    }
+                    EO6C
+            }
+
+            for @classes -> $c {
+                @p6classes.push(qq:to<EOUC>);
+                    our class {$c.cname} does Struct is MonoStructClass does {$c.prole_name}\[{$c.prole_val}]{" does {$c.sharedrole}" if $c.sharedrole} is export(:DEFAULT, :structs) \{
+                        constant cstruct = {$c.cstruct}::cstruct;
+                        method cstruct \{ cstruct }
+
+                        # XXX Inheriting this seems problematic
+                        # Optimize leaf nodes, since there can be tens of thousands
+                        multi method new (Pointer \$p, Int :\$left! is rw, Bool :\$free = True) \{
+                            my \$cs = nativecast(cstruct, \$p);
+                            \$left -= cstruct.wiresize;
+                            fail("Short packet.") unless \$left >= 0;
+                            my \$res = self.bless(|\$cs.Hash);
+                            xcb_free \$p if \$free;
+                           \$res;
+                        }
+
+                    }
+                    EOUC
             }
         }
+        if ($skiprest) {
+            $mod.cstructs.append(@cstructs);
+            @cstructs = ();
+            $mod.p6classes.append(@p6classes);
+            @p6classes = ();
+            next;
+        }
+        if $mod.occlude{$struct.attribs<name>}.isa(ocmunge) {
+            my $o = $mod.occlude{$struct.attribs<name>};
+            $roles = " does {$o.prole_name}\[{$o.prole_val}]";
+        }
+
 
         my @has = $p.params».c_attr;
         @cstructs.push: @has.first(/:i^^\s*has\s/) ?? qq:to<EOCS>
@@ -2363,7 +2548,6 @@ sub MakeStructs($mod) {
 
         @p6classes.push(qq:to<EO6C>);
             $prestruct
-
             {@doc.join("\n")}
             our class {$clname} does Struct$roles is export(:DEFAULT, :structs) \{
 
@@ -2384,48 +2568,22 @@ sub MakeStructs($mod) {
             }
             EO6C
 
-            if $clname eq 'CommonBehavior' {
-                @cstructs.push(@cstructs[*-1]);
-                @p6classes.push(q:to<EOBH>)
-                our class Behavior is export(:DEFAULT, :structs) {
-                    constant cstruct = CommonBehavior::cstruct;
-
-                    multi method new(|c (Int $t, |rest)) { callwith(BehaviorTypeEnum::BehaviorType($t), |rest) }
-                    multi method new(BehaviorTypeEnum::BehaviorType:D $t, |rest) {
-                        my $bhname = $t.Str;
-                        $bhname ~~ s/^BehaviorType//;
-                        $bhname ~= "Behavior";
-                        ::($bhname).new(|rest);
-                    }
-                    multi method new(Pointer $p, :$left, Bool :$free = False) {
-                        my $l = $left;
-                        nextwith($p, :left($l), :$free);
-                    }
-                    multi method new(Pointer $p, :$left! is rw, Bool :$free = False) {
-                        die ("Short Packet")
-                           if $left < cstruct.wiresize;
-                        my $cb = nativecast(cstruct, $p);
-                        my $bhname = BehaviorTypeEnum::BehaviorType($cb.type);
-                        $bhname ~~ s/^BehaviorType//;
-                        $bhname ~= "Behavior";
-                        ::($bhname).new($p, :$left, :$free);
-                    }
-                }
-            EOBH
-            }
-
         my @resolve;
         while $mod.subclasses.grep(*.value eq $clname).cache -> $list {
             for |$list {
                 my $newname = $_.key;
-                @cstructs.push(@cstructs[*-1]);
-                @p6classes.push(qq:to<EOSC>);
+                if not $mod.occlude{$newname} {
+                    @cstructs.push(@cstructs[*-1]);
+                    @p6classes.push(qq:to<EOSC>);
 
                     our class $newname is $clname is export(:DEFAULT, :structs) \{
                         constant cstruct = {$clname}::cstruct;
+                        method cstruct \{ cstruct }
                     }
 
                     EOSC
+                }
+
                 @resolve.push($newname);
                 $mod.subclasses{$clname}:delete;
             }
@@ -2773,16 +2931,9 @@ sub Output ($mod) {
     $out.print($mod.typedefs.join);
     $out.print($mod.p6classes.grep({$_ !~~ /TODOP6/}).join);
 
-#    for $mod.rolecstruct.kv -> $rname, $ratt {
-#        $out.print(
-#            "class {$rname}::cstruct \{ # is repr('CStruct') from stub above\n"
-#            ~
-#            (qq:to<EOAT> for |$ratt).join("\n").indent(4) ~ "\n}\n";
-#                HAS $_\:\:cstruct \$\.$_;
-#                sub set_$_ ($_\:\:cstruct \$it) \{ \$\!$_ := \$it }
-#                EOAT
-#        )
-#    }
+    for $mod.occludes.grep(!*.cstruct_done) -> $o {
+        $out.print($o.cstruct);
+    }
 
     $out.print($mod.epilogue);
 
@@ -2804,7 +2955,39 @@ sub Output ($mod) {
     $out.close;
 }
 
-sub makeClientMessageData($p, *%_) {
+sub makeParasiticList($p, $f, *%) {
+    # Here we expect a second list enabled by a bool
+    # which has the same length of the list above it.
+    my $name = $f.attribs<name>;
+    my $type = $f.attribs<type>;
+    # Should have two fieldrefs with a "*" op, one of
+    # them should be boolean.
+    (my $l_bool, my $l_int) =
+        $f.elements(:TAG<fieldref>, :RECURSE).map: *.contents.Str;
+    $p{$name}.p_attr = "has @.$name;";
+    $p{$name}.c2p_code = qq:to<EOPC>;
+        if \$pstruct.$l_bool \{
+            \@args.append:
+                "$name",
+                (for 0..^\$pstruct\.$l_int \{
+                     # XXX no assurance pointer math will not start adding by sizeof
+                     $type\.new(Pointer.new(\$p + \$oleft - \$left),
+                                :\$left, :!free);
+                    }
+                )
+        }
+        EOPC
+    $p{$l_bool}.p_attr = |();
+    $p{$l_bool}.c2p_arg = |();
+    $p{$l_bool}.p2c_init = qq:to<EOPA>;
+            \$\!$l_bool = +?\$p6.$name;
+            die 'Wrong number of elements in $name'
+                unless \$p6.$name\.elems == \$\!$l_int;
+            EOPA
+    $p{$name}.p2c_code = "\@bufs.push(\$_.bufs) for \@\.$name;"
+}
+
+sub makeClientMessageData($p, $f, *%_) {
     $p<data>.c_attr = q:to<EOCM>;
         has uint32 $.cmd___pad0;
         has uint32 $.cmd___pad1;
