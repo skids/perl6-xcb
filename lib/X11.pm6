@@ -50,10 +50,12 @@ our class Connection is export {
     #| said extension, pre-sorted by descending base value.
     has $.error_bases is rw;
     has $.event_bases is rw;
+    has $.xge_bases is rw;
     #| Lock for preventing simultaneous access to error/event bases
     #| (May be used in future for runtime extension loading)
     has Lock $.error_lock = Lock.new();
     has Lock $.event_lock = Lock.new();
+    has Lock $.xge_lock = Lock.new();
     #| Lock used *only* by requests that send fds, to prevent
     #| disordering between calls to xcb_send_fd and xcb_send_request
     has Lock $.fd_lock = Lock.new();
@@ -124,7 +126,8 @@ our class Connection is export {
     my sub wait(Channel $cookies, Channel $watch, Channel $destroying,
                 xcb_connection_t $xcb is raw,
                 $error_bases, $error_lock,
-                $event_bases, $event_lock) {
+                $event_bases, $event_lock,
+		$xge_bases, $xge_lock) {
 
         use NativeCall;
         constant $null = Pointer.new(0);
@@ -275,16 +278,27 @@ our class Connection is export {
                         # An event.  If we have a watcher, use it.
                         if $watcher.defined {
 
-                            my class eventstub does X11::XCB::Event[0] { 
+                            my class eventstub does X11::XCB::Event[0] {
                                 method cstruct { X11::XCB::Event::cstruct };
                             }
+                            my class xgestub does X11::XCB::XGEvent[0] {
+                                method cstruct { X11::XCB::XGEvent::cstruct };
+                            }
+                            my $code = $gev.code;
 
                             $evsent .= then({
                                 my $left = Inf;
-                                my $res = eventstub.subclass(
-                                    nativecast(Pointer,$ev), :$left, :free,
-                                    :$event_bases, :$event_lock
-                                );
+                                my $res;
+                                if $code == 35 {
+                                     $res = xgestub.subclass(
+                                        nativecast(Pointer,$ev), :$left, :free,
+                                        :$xge_bases, :$xge_lock);
+                                }
+                                else {
+                                     $res = eventstub.subclass(
+                                        nativecast(Pointer,$ev), :$left, :free,
+                                        :$event_bases, :$event_lock);
+                                }
                                 $watcher.send($res)
                             });
                         }
@@ -430,7 +444,8 @@ our class Connection is export {
     }
     has $.waiter = wait($!cookies, $!watch, $!destroying, $!xcb,
                         $!error_bases, $!error_lock,
-                        $!event_bases, $!event_lock);
+                        $!event_bases, $!event_lock,
+                        $!xge_bases, $!xge_lock);
 
     method DESTROY {
         $!res_ask.close;
@@ -449,6 +464,7 @@ our class Connection is export {
         );
         my @errorcodes;
         my @eventcodes;
+        my @xgecodes;
         for $extmap.kv -> $extt, $modname {
             my $reply = xcb_get_extension_data($xcb, $extt);
             if $reply.present {
@@ -460,17 +476,24 @@ our class Connection is export {
                     Pair.new($reply.first_event +& 0xff,
                              ::("X11::XCB::$modname\::\$eventcodes")))
                     if $reply.first_event;
+                @xgecodes.push(
+                    Pair.new($reply.major_opcode +& 0xff,
+                             ::("X11::XCB::$modname\::\$eventcodes")))
+                    if $reply.major_opcode;
             }
         }
         @errorcodes.push(Pair.new(0, $X11::XCB::XProto::errorcodes));
         @eventcodes.push(Pair.new(0, $X11::XCB::XProto::eventcodes));
+        @xgecodes.push(Pair.new(0, $X11::XCB::XProto::xgecodes));
 
         @errorcodes .= sort: *.key;
         @eventcodes .= sort: *.key;
+        @xgecodes .= sort: *.key;
 
         $extmap,
         [@errorcodes.reverse.map({|($_.key,$_.value)})],
-        [@eventcodes.reverse.map({|($_.key,$_.value)})];
+        [@eventcodes.reverse.map({|($_.key,$_.value)})],
+        [@xgecodes.reverse.map({|($_.key,$_.value)})];
     }
 
     multi method new (Int $fd!, X11::AuthInfo :$Auth) {
@@ -482,8 +505,9 @@ our class Connection is export {
         my $extmap;
         my $error_bases;
         my $event_bases;
-	($extmap, $error_bases, $event_bases) = ext_init($xcb);
-        self.bless(:$xcb, :$extmap, :$error_bases, :$event_bases);
+        my $xge_bases;
+	($extmap, $error_bases, $event_bases, $xge_bases) = ext_init($xcb);
+        self.bless(:$xcb, :$extmap, :$error_bases, :$event_bases, :$xge_bases);
     }
     multi method new (IO $io!, X11::AuthInfo :$Auth) {
         fail "Getting the fd from {$io.perl} NYI"
@@ -501,8 +525,9 @@ our class Connection is export {
         my $extmap;
         my $error_bases;
         my $event_bases;
-	($extmap, $error_bases, $event_bases) = ext_init($xcb);
-        self.bless(:$xcb, :$extmap, :$error_bases, :$event_bases);
+        my $xge_bases;
+	($extmap, $error_bases, $event_bases, $xge_bases) = ext_init($xcb);
+        self.bless(:$xcb, :$extmap, :$error_bases, :$event_bases, :$xge_bases);
     }
     multi method new (Str $Display, X11::AuthInfo :$Auth!) {
         my uint32 $screen;
@@ -515,8 +540,9 @@ our class Connection is export {
         my $extmap;
         my $error_bases;
         my $event_bases;
-	($extmap, $error_bases, $event_bases) = ext_init($xcb);
-        self.bless(:$xcb, :$extmap, :$error_bases, :$event_bases);
+        my $xge_bases;
+	($extmap, $error_bases, $event_bases, $xge_bases) = ext_init($xcb);
+        self.bless(:$xcb, :$extmap, :$error_bases, :$event_bases, $xge_bases);
     }
     multi method new (*%extra) {
         self.new(Str, |%extra);

@@ -375,7 +375,7 @@ our role Error[$error_code] is export(:internal) {
     #| associated :error_lock to serialize access.  An lvalue :length to
     #| prevent buffer overruns must be supplied (but can be Inf).
     #| This will be altered based on the encountered structure.
-    #| Finally is :!free is not passed the raw protocol packet will
+    #| Finally if :!free is not passed the raw protocol packet will
     #| be freed.
     method subclass (Pointer $p, :$error_bases!, :$error_lock!,
                      :$left! is rw, :$free = True) {
@@ -474,7 +474,7 @@ our role Event[$event_code] is export(:internal) {
     #| associated :event_lock to serialize access.  An lvalue :length to
     #| prevent buffer overruns must be supplied (but can be Inf).
     #| This will be altered based on the encountered structure.
-    #| Finally is :!free is not passed the raw protocol packet will
+    #| Finally if :!free is not passed the raw protocol packet will
     #| be freed.
     method subclass (Pointer $p, :$event_bases!, :$event_lock!,
                      :$left! is rw, :$free = True) {
@@ -492,6 +492,104 @@ our role Event[$event_code] is export(:internal) {
             }
         };
         die "Unknown event code, or extension IDs somehow failed to cache"
+            if $cl === Any;
+        $cl.new($p, :$left, :$free);
+    }
+}
+
+our role XGEvent[$event_code] is export(:internal) {
+
+    method cstruct {...}
+
+    # XXX Review: this was originally exported but rakudo changed something
+    my class XGEvent::cstruct is repr("CStruct") {
+        has uint8 $.code;
+        has uint8 $.detail;
+        has uint16 $.sequence;
+        has uint32 $.length is rw;
+        has uint16 $.getype is rw;
+    }
+
+    #| Create a new X11 protocol XGE Perl6 object.
+    #| A first parameter, if provided, is a Pointer to buffer data.
+    #| If provided, :left designates the length of data (in bytes) available
+    #| in the buffer, and safety checks will prevent reading off the end.
+    #| :left may be undefined to trust the data's self-proclaimed length.
+    #| Safety checks will be promulgated to substructures in either case.
+    #| If :left refers to an lvalue, it will be modified to contain the
+    #| amount of excess space in the buffer.
+    #| If :free is set (the default) the buffer is assumed
+    #| to point to a natively allocated buffer and the
+    #| the Pointer will be freed.
+    #| If no Pointer is provided, attributes may be initialized normally.
+    multi method new (Pointer $p, Int :$left! is rw, Bool :$free = True) {
+        my $cs = nativecast(self.cstruct, $p);
+        $left -= self.cstruct.wiresize;
+        fail("Short packet.") unless $left >= $cs.length * 4 + 22;
+        my $res = self.bless(|$cs.Hash);
+        xcb_free $p if $free;
+        $res;
+    }
+    multi method new (Pointer $p, Int :$left!, Bool :$free = True) {
+        my Int $l = $left;
+        self.new($p, :left($l), :$free);
+    }
+    multi method new (Pointer $p, Bool :$free = True) {
+        my $left = 262140; # XXX actual max size
+        self.new($p, :$left, :$free);
+    }
+    multi method new (|c) {
+        nextsame;
+    }
+
+    method child_bufs { |() }
+    method child_structs(Pointer $p, $pstruct, Real :$left! is rw) { |() }
+
+    method Buf {
+        # XXX This is not technically safe.  We want GC memory,
+        # and aliases into it, but GC memory can move anytime.
+        my $len = $.cstruct.wiresize;
+        my $res = Buf.new(0 xx $len);
+        my $c := nativecast($.cstruct, $res);
+        $c.nativize(self);
+        $res;
+    }
+    method bufs {
+        self.Buf, |self.child_bufs;
+    }
+
+    method event_code($c) {
+        $event_code; # XXX need to add extension base
+    }
+
+    #| Find the appropriate subclass based on event codes.
+    #| This is more a method of the role group than of any
+    #| parameterization.  Takes a (positional) pointer to a raw protocol
+    #| packet containing an event, a :event_bases array containing a list
+    #| of alternating event base values and eventcode maps, and an
+    #| associated :event_lock to serialize access.  An lvalue :length to
+    #| prevent buffer overruns must be supplied (but can be Inf).
+    #| This will be altered based on the encountered structure.
+    #| Finally if :!free is not passed the raw protocol packet will
+    #| be freed.
+    method subclass (Pointer $p, :$event_bases!, :$event_lock!,
+                     :$left! is rw, :$free = True) {
+
+        die "Packet too short" unless $left >= nativesizeof(Event::cstruct);
+        my $cs = nativecast(XGEvent::cstruct, $p);
+        fail("Short packet.") unless $left >= $cs.length * 4 + 22;
+        my $code = $cs.getype +& 0xffff;
+        my $cl;
+        $event_lock.protect: {
+            for |$event_bases -> $k, $v {
+                next if $k > $code;
+                if $v{$code - $k}:exists {
+                    $cl = $v{$code - $k};
+                    last;
+                }
+            }
+        };
+        die "Unknown XGE event code, or extension IDs somehow failed to cache"
             if $cl === Any;
         $cl.new($p, :$left, :$free);
     }

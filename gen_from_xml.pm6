@@ -1,5 +1,7 @@
 #!/usr/bin/env perl6
+use lib 'lib';
 use XML;
+use X11::XCBquirks;
 
 # Places we are likely to find XCB-XML files
 my @xmlpaths = "/usr/share/xcb";
@@ -270,10 +272,6 @@ my %Occludes is default(|());
                              :torole({ $_ ~~ /(.*?)\d*$/; $/[0] ~ "Behavior" }),
                              :totype({ $_ ~ "Behavior" }))
                )
-    # TODO
-    # XInput: InputClass Feedbackclass DeviceControl DeviceClassType maybe more
-    # xkb: EventType DoodadType and maybe more
-    # ...and retool event enums everywhere to act similarly
 ;
 
 class mod {
@@ -294,6 +292,8 @@ class mod {
     has %.opcodes is rw;
     has %.errors is rw;
     has %.events is rw;
+    has %.expexp is rw;   # explicit EXPORT packages
+    has %.xge is rw;
     has %.occlude is rw;  # resulting munges for occlusions
     has @.occludes is rw; # tweaks for occluding certain enums
     has Array %.rolecstruct is rw;
@@ -677,14 +677,15 @@ sub MakeEnums ($mod) {
     }
 
     # Keep some things in their own namespace rather than munging them
-    my sub fix_export($enum) {
+    my sub fix_export($mod, $enum) {
         my @elements = $enum.elements(:TAG<item>);
-        my @res = " is export(:DEFAULT, :internal)", " is export(:enums)";
+        my @res = $(:DEFAULT,), " is export(:enums)";
+	my $ename = $mod.modname ~ "::" ~ $enum.attribs<name>;
 
         # Perl6 things that can be overidden, but avoid surprises
         # TODOP6: will have to go look for more of these pre-publication
         # TODOP6: better exemption logic here rather than cherry picking
-        if $enum.attribs<name> ne "CW" {
+        if $ename ne "XProto::CW" {
             if @elements.first(*.attribs<name> eq any <
                  Cursor
                 >) {
@@ -693,9 +694,36 @@ sub MakeEnums ($mod) {
         }
 
         # conflicts within or between modules
-        @res[0] = " is export(:internal)" if $enum.attribs<name> eq any <
-            NotifyDetail NotifyMode
-        >;
+	with %X11::XCBquirks::EnumExports{$ename} {
+            @res[0] = $_;
+        }
+	with %X11::XCBquirks::EnumValueExports{$ename} {
+# To workaround RT#127305 we cannot do this inline
+#	    @res[1] = ' is export'
+#                ~ @$_.perl
+# Instead add it to the post-scope explicit EXPORTs
+            @res[1] = '';
+
+            my $evc = "our constant {$enum.attribs<name>} = ::X11::XCB::{$ename}Enum";
+            for @(@res[0]) -> $eve {
+                $mod.expexp{"EXPORT::" ~ $eve.key} ~= "$evc;\n";
+            }
+	    @res[0] = '';
+            for @elements -> $eve {
+                my $evf = fix_valname($eve.attribs<name>, $enum.attribs<name>);
+                my $n = $ename ~ "Enum::" ~ $enum.attribs<name>;
+                $evc = "our constant $evf = ::X11::XCB::"
+                    ~ $n ~ "::" ~ $evf ~ ";\n";
+                for @(%X11::XCBquirks::EnumValueExports{$ename}) {
+                    $mod.expexp{"EXPORT::" ~ $_.key} ~= $evc;
+                    $mod.expexp{$n ~ "::EXPORT::" ~ $_.key} ~= $evc;
+                }
+            }
+        }
+
+        if @res[0] {
+	    @res[0] = " is export{@(@res[0]).perl}"
+        }
 
         |@res;
     }
@@ -733,7 +761,7 @@ sub MakeEnums ($mod) {
             or $item eq "PointerRoot" and $from eq "InputFocus"
             or $item eq any <
                 None Success Off On Any Default Normal
-                Lock Shift Insert Delete Button
+                Lock Shift Insert Delete
                 Control Pointer Cursor Async
                 Grab LedMode AutoRepeatMode
                 KbdFeedbackClass BellFeedbackClass
@@ -756,10 +784,10 @@ sub MakeEnums ($mod) {
         else {
             $ename = fix_name($ename);
 	    $mod.renums{$e.attribs<name>.Str} = ($ename => { });
-            (my $export_ext, my $export_int) = fix_export($e);
+            (my $export_ext, my $export_int) = fix_export($mod,$e);
 
             $mod.enums.push:
-            "our class {$ename}Enum$export_ext \{\n" ~
+            "our package {$ename}Enum$export_ext \{\n" ~
             "    our enum {$ename}$export_int «\n        " ~
             (for $e.elements(:TAG<item>) -> $item {
                 state $lastval = -Inf;
@@ -789,7 +817,7 @@ sub MakeImports($for, @mods) {
     my $res = "";
     for @imports -> $cname {
         my $from = @mods.first(*.cname eq $cname.contents);
-        $res ~= "use X11::XCB::$from.modname() :internal, :DEFAULT;\n";
+        $res ~= "use X11::XCB::$from.modname() :internal;\n";
     }
     $for.prologue ~= $res;
 
@@ -966,7 +994,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                     $p{$name}.c_offset = $offset;
                     $p{$name}.c_attr = qq:to<EOCT>;
                         # TODO: need to verify correct packing
-                        HAS {$pptype}::cstruct \$.$name$rw;
+                        HAS {$pptype eq "Event" ?? "X11::XCB::Event" !! $pptype}::cstruct \$.$name$rw;
                         # This only works right on objects gotten via nativecast and not full of zeros
                         method {$name}___pointerto \{
                             nativecast(Pointer[uint8],\$\!$name);
@@ -2059,14 +2087,11 @@ sub MakeEvents($mod) {
     my $oname = $mod.cname eq "xproto" ?? "" !! $mod.modname;
 
     for $mod.xml.root.elements(:TAG<event>) -> $event {
-        my params $p .= new(:init_offset(3));
+        my $xge = $event.attribs<xge>:exists
+                  and $event.attribs<xge>:exists ~~ /:i true/;
+        my params $p .= new(:init_offset($xge ?? 14 !! 3));
         my $padnum = -1;
         my $dynsize = 0;
-
-        if $event.attribs<xge>:exists and $event.attribs<xge>:exists ~~ /:i true/ {
-            $mod.p6classes.push("TODOP6: XGE event {$oname}::{$event.attribs<name>.Str}\n");
-            next
-        }
 
         %eventcopies{$oname ~ $event.attribs<name>.Str} := $p;
         for $event.nodes -> $e {
@@ -2095,13 +2120,49 @@ sub MakeEvents2($mod) {
     my @p6classes;
     my $oname = $mod.cname eq "xproto" ?? "" !! $mod.modname;
 
+    unless $oname {
+        # Add GeGeneric by hand since the xml is pseudo
+        @cstructs.push(q:to<EGEC>);
+            our class cstruct does cpacking is repr("CStruct") {
+                has uint8 $.response_type is rw;
+                has uint8 $.extension is rw;
+                has uint16 $.sequence is rw;
+                has uint32 $.length is rw;
+                has uint16 $.getype is rw;
+
+                method Hash {
+                  { :$!response_type, :$!extension,
+                    :$!sequence, :$!length, :$!getype }
+                }
+                method nativize($p6) {
+                    :$!response_type = $p6.response_type;
+                    :$!extension = $p6.extension;
+                    :$!sequence = $p6.sequence;
+                    :$!length = $p6.length;
+                    :$!getype = $p6.getype;
+                }
+            }
+            my $.cstruct = cstruct;
+            EGEC
+        @p6classes.push(qq:to<EGEP>);
+            our class GeGenericEvent does Event[35] is export(:DEFAULT, :events) \{
+            { @cstructs[*-1].indent(4) }
+                has \$\.response_type;
+                has \$\.extension;
+                has \$\.sequence;
+                has \$\.length;
+                has \$\.getype;
+            }
+            EGEP
+    }
     for (|$mod.xml.root.elements(:TAG<event>),|$mod.xml.root.elements(:TAG<eventcopy>)) -> $event {
         my params $p;
         my $padnum = -1;
         my $ename = $event.attribs<name>;
+        next if $ename eq "GeGeneric";
         my $prestruct = "";
-
-        next without %eventcopies{$oname ~ $ename}; # Remove this after XGE events implemented
+        my $xge = $event.attribs<xge>:exists
+                  and $event.attribs<xge>:exists ~~ /:i true/;
 
         if $event.name eq "eventcopy" {
             $p := %eventcopies{$oname ~ $event.attribs<ref>.Str} //
@@ -2129,11 +2190,27 @@ sub MakeEvents2($mod) {
 
         my $lift = 'has uint8 $.event_code is rw;';
         my $start = 1;
+        my $codes_init = '$!response_type = $p6.event_code;';
         if $p.params[0].c_attr !~~ /pad0/ {
             $lift = $p.params[0].c_doc ~ "\n" ~ $p.params[0].c_attr;
         }
         elsif $p.params[0].c_attr ~~ /___pad/ {
             $start = 0;
+        }
+        $lift ~= "\nhas uint16 \$.sequence is rw;";
+
+        if $xge {
+            $lift = q:to<EOGF>;
+                has uint8 $.extension is rw;
+                has uint16 $.sequence is rw;
+                has uint32 $.length is rw;
+                has uint16 $.getype is rw;
+                EOGF
+            $start = 0;
+	    $codes_init = q:to<EOCI>
+                $!response_type = 35;
+                $!getype = $p6.event_code;
+                EOCI
         }
 
         @cstructs.push(qq:to<EOCS>);
@@ -2142,7 +2219,6 @@ sub MakeEvents2($mod) {
 
                     has uint8 \$.response_type is rw;
             $lift.indent(8)
-                    has uint16 \$.sequence is rw;
             {({ |(.c_doc, .c_attr) } for $p.params[$start..^*]).join("\n").indent(8)}
 
                     method Hash \{
@@ -2152,7 +2228,7 @@ sub MakeEvents2($mod) {
                         }
                     }
                     method nativize(\$p6) \{
-                        \$\!response_type = \$p6.event_code;
+                        $codes_init
                         \$\!sequence = \$p6.sequence // 0;
             {$p.params».p2c_init.join("\n").indent(12)}
                     }
@@ -2164,17 +2240,27 @@ sub MakeEvents2($mod) {
 
         my $clname = $event.attribs<name>.Str;
         $clname = $clname.lc.tc if $clname ~~ /^<upper>+$/;
-        $mod.events{$number} = $oname ~ $clname ~ "Event";
+
+        my $role;
+	if $xge {
+            $role = "XGEvent";
+            $mod.xge{$number} = $oname ~ $clname ~ $role;
+        }
+        else {
+            $role = "Event";
+            $mod.events{$number} = $oname ~ $clname ~ $role;
+        }
         %cstructs{$oname ~ $event.attribs<name>} = $clname;
         %cstructs{$clname} = $clname;
 
         my @doc;
         @doc.append(MakeClassDocs($event, $clname));
 
+
         @p6classes.push(qq:to<EO6C>);
             $prestruct
             {@doc.join("\n")}
-            our class {$oname}{$clname}Event does Event[$number] is export(:DEFAULT, :events) \{
+            our class {$oname}{$clname}{$role} does $role\[$number] is export(:DEFAULT, :events) \{
                 my \$.event_code = $number; # without the extension base number
 
                 { @cstructs[*-1] }
@@ -2368,7 +2454,6 @@ sub MakeStructs($mod) {
         $clname = $clname.lc.tc if $clname ~~ /^<upper>+$/;
         $clname = (given $clname {
             when "Str" { "String" }
-            when "Notify" { "{$oname}Notify" }
             when "Modeinfo" { "{$oname}Modeinfo" }
             when "Format" { "{$oname}Format" }
             when "Event" { "{$oname}Event" }
@@ -2546,10 +2631,15 @@ sub MakeStructs($mod) {
             EO6O
         }
 
+	my $export = " is export(:DEFAULT, :structs)";
+	with %X11::XCBquirks::StructExports{$mod.modname ~ "::" ~ $clname} {
+            $export = " is export{@$_.perl}";
+        }
+
         @p6classes.push(qq:to<EO6C>);
             $prestruct
             {@doc.join("\n")}
-            our class {$clname} does Struct$roles is export(:DEFAULT, :structs) \{
+            our class {$clname} does Struct$roles$export \{
 
                 {$p.params».p_subclasses.join("\n").indent(4)}
 
@@ -2948,9 +3038,19 @@ sub Output ($mod) {
               $_.key ~ " => " ~ $_.value
            }).join(",\n").indent(4) }
         };
+        our \$xgecodes = :\{
+        { (for $mod.xge.sort(+*.key) {
+              $_.key ~ " => " ~ $_.value
+           }).join(",\n").indent(4) }
+        };
         EOEH
 
     $out.print("\n}\n");
+
+    for $mod.expexp -> ( :$key, :$value ) {
+        $out.print: "package $key \{\n{$value.indent(4)}\n}\n";
+    }
+
     say($mod.p6classes.grep({$_ ~~ /TODOP6/}).join);
     $out.close;
 }

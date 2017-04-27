@@ -198,7 +198,7 @@ say +ImageOrderEnum::LSBFirst;     # says 0
 }
 ```
 
-...further, within each of these classes the enum itself has been
+...further, within most of these classes the enum itself has been
 marked to export using the ":enums" tag.  So if you want to load
 the individual symbols from a single enum directly into a namespace,
 you may import them (and along with them the name of the actual enum):
@@ -210,10 +210,29 @@ LSBFirst.perl.say;                 # says ImageOrder::LSBFirst
 say +LSBFirst;                     # says 0
 ```
 
-...In any case where enums use identifiers that conflict with
+In some cases some a tag other than ":enum" is used for
+special subgroups of enums.  These cases mostly make sense
+from a use case perspective, but to tell the truth they
+are mostly making lemonade out of the fact that exported
+symbols are unit scoped rather than scoped to their
+containing class, so two enums cannot have the same symbol
+if they can be exported. (Currently due to RT#127305, there
+are also extra hoops to jump through.)
+
+Also, in any case where enums use identifiers that conflict with
 Perl 6 core base names, and munging their names would be messy,
-they are hidden behind a ":danger" export tag -- and you should
-probably take care to lexically contain them.
+the tag from which they may be imported will include the text
+"danger" -- and you should probably take care to lexically
+contain them.
+
+To see which enums do not use the enum tag, and what tag they
+use, examine %EnumValueExports from the X11::XCBquirks module.
+
+Note that any enum values using the excessively common names
+C<None> and C<Success> will be renamed, but since the vast majority
+of occurrences of these identifiers have the same value,
+X11::XCB::XProto exports constants C<None> and C<Success> which
+you can use in their place.  Or just use 0.
 
 ### enums in value_lists/value_masks
 
