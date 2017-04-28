@@ -228,11 +228,12 @@ contain them.
 To see which enums do not use the enum tag, and what tag they
 use, examine %EnumValueExports from the X11::XCBquirks module.
 
-Note that any enum values using the excessively common names
-C<None> and C<Success> will be renamed, but since the vast majority
-of occurrences of these identifiers have the same value,
-X11::XCB::XProto exports constants C<None> and C<Success> which
-you can use in their place.  Or just use 0.
+Note that any enum values using the rather common names
+C<None>, C<Success>, and C<Normal> will be renamed, but since the
+vast majority of occurrences of these identifiers have the same
+value, X11::XCB::XProto exports constants which you can use
+in their place.  Or just use 0.  But verify the enum you want
+is not one of the exceptions that has a different value, first.
 
 ### enums in value_lists/value_masks
 

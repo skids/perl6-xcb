@@ -568,12 +568,14 @@ sub MakeMod ($xml) {
 
             EOE
     } else {
+        my $cheez;
+	for %X11::XCBquirks::EnumValueConst -> (:$key, :$value) {
+	    $cheez ~= "constant $key is export(:internal, :enums) = $value;\n"
+	}
         $prologue ~= qq:to<EOE>;
 
-            # Provide a way to cheese around lots of enums using these
-            constant None is export(:internal, :enums) = 0;
-            constant Success is export(:internal, :enums) = 0;
-
+            # Provide a way to skirt around lots of enums using these
+	    $cheez
             EOE
     }
 
@@ -760,14 +762,9 @@ sub MakeEnums ($mod) {
             # Individual values
             or $item eq "PointerRoot" and $from eq "InputFocus"
             or $item eq any <
-                None Success Off On Any Default Normal
-                Lock Shift Insert Delete
-                Control Pointer Cursor Async
-                Grab LedMode AutoRepeatMode
-                KbdFeedbackClass BellFeedbackClass
-		LedFeedbackClass DfltXIClass
-                AllXIClasses Outline
-            >;
+                Off On Any Lock Shift Insert Delete Control Pointer Cursor
+            >
+	    or %X11::XCBquirks::EnumValueConst{$item}:exists;
 
         return "VISUAL"       if $item eq "VISUALID"; # restore consistency
 
@@ -776,6 +773,14 @@ sub MakeEnums ($mod) {
 
     for $mod.xml.root.elements(:TAG<enum>) -> $e {
         my $ename = $e.attribs<name>;
+
+	# Eliminate silly single-value enums
+	if $e.elements.elems == 1 {
+            with %X11::XCBquirks::EnumValueConst{$e.elements[0].attribs<name>}
+            {
+	        next if $_ == +$e.elements[0].nodes[0].text;
+            }
+        }
 
         if $mod.occludes.first(*.enum eq $ename) -> $occlude {
             $mod.occlude.append($occlude.doeses($e));
@@ -2775,13 +2780,18 @@ sub MakeReplies($mod) {
                     my \$.cstruct = cstruct;
                 EOCS
 
+            my $export = $(:DEFAULT, :replies);
+            with %X11::XCBquirks::RequestExports{$mod.modname ~ "::" ~ $clname} {
+                $export = $_;
+            }
+	    $export = "is export" ~ @$export.perl;
 
             @p6classes.push(qq:to<EO6C>);
                 {@doc.join("\n")}
                 our class {$clname}Reply
-                    does Reply[{$oname}OpcodeEnum::{$oname}Opcode({$req.attribs<opcode>})]
-                    {$flagroles}
-                    is export(:DEFAULT, :replies) \{
+                    does Reply[OpcodeEnum::Opcode({$req.attribs<opcode>})]
+                    $flagroles
+                    $export \{
 
                 {$p.params».p_subclasses.join("\n").indent(4)}
 
@@ -2928,17 +2938,24 @@ sub MakeRequests($mod) {
         }
         EOFD
 
+        my $export = $(:DEFAULT, :requests);
+        with %X11::XCBquirks::RequestExports{$mod.modname ~ "::" ~ $clname} {
+            $export = $_;
+        }
+	$export = "is export" ~ @$export.perl;
+
+
         @p6classes.push(qq:to<EO6C>);
             {%GoodReqs{$isvoid ?? "Nil" !! "$oname $clname"} ?? "" !! "# TODOP6 Reply has TODOP6s"}
             {@doc.join("\n")}
             our class {$clname}Request
-                does Request[{$oname}OpcodeEnum::{$oname}Opcode({$req.attribs<opcode>}),
+                does Request[OpcodeEnum::Opcode({$req.attribs<opcode>}),
                              {$mod.cname eq "xproto"
                                   ?? "xcb_extension_t"
                                   !! '&xcb_' ~ $mod.cname ~ "_id"},
                              {$isvoid.gist}]
                 $flagroles
-                is export(:DEFAULT, :requests) \{
+                $export \{
 
                 my \$.reply{ $isvoid ?? ";" !! " = " ~ $clname ~ "Reply" ~ ";" }
 
@@ -3009,9 +3026,18 @@ sub Output ($mod) {
     $out .= open(:w);
     $out.print($mod.prologue ~ "\n");
 
+    $mod.expexp{'EXPORT::' ~ $mod.modname ~ 'opcodes'} ~= # XXX should just be "EXPORT::opcodes"
+        "our constant OpcodeEnum = ::X11::XCB::{$mod.modname}::OpcodeEnum;\n";
+    for $mod.opcodes {
+        my $const = "our constant {.value} = ::X11::XCB::{$mod.modname}::OpcodeEnum::Opcode::{.value};\n";
+        $mod.expexp{'EXPORT::' ~ $mod.modname ~ 'opcodeenums'} ~= $const; # XXX should just be "EXPORT::opcodeenums"
+        $mod.expexp{$mod.modname ~ '::OpcodeEnum::Opcode::EXPORT::opcodeenums'} ~= $const;
+    }
     $out.print( qq:to<EOOC> ) if $mod.opcodes;
-        our class { $mod.extension ?? $mod.modname !! "" }OpcodeEnum is export(:DEFAULT, :opcodes) \{
-            our enum { $mod.extension ?? $mod.modname !! "" }Opcode is export(:enums) «
+        our class OpcodeEnum # is export(:opcodes) XXX needs RT
+        \{
+            # is export(:opcodeenums) XXX needs RT
+            our enum Opcode «
         { (":{.value}({.key})\n" for $mod.opcodes.sort(+*.key)).join.indent(8) }
             »;
         }
