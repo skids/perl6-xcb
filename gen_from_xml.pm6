@@ -762,7 +762,7 @@ sub MakeEnums ($mod) {
             # Individual values
             or $item eq "PointerRoot" and $from eq "InputFocus"
             or $item eq any <
-                Off On Any Lock Shift Insert Delete Control Pointer Cursor
+                Off On Any Lock Shift Insert Delete Control Pointer Cursor Normal
             >
 	    or %X11::XCBquirks::EnumValueConst{$item}:exists;
 

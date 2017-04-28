@@ -10,7 +10,7 @@ unit package X11::XCBquirks;
 # Enum name/value mappings whose names should be prefixed with
 # their module name, or if they stand alone in an enum with
 # no other values, eliminated entirely.
-our %EnumValueConst = :None(0), :Success(0), :Normal(0);
+our %EnumValueConst = :None(0), :Success(0); #, :Normal(0);
 
 #| Enum packages not exported by default due to inter-module
 #| or internal namespace conflicts.
