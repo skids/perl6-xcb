@@ -6,11 +6,10 @@ unit package X11::XCBquirks;
 # but also available as a module for the purposes of
 # documentation, or perhaps for programmatic uses.
 
-
 # Enum name/value mappings whose names should be prefixed with
 # their module name, or if they stand alone in an enum with
 # no other values, eliminated entirely.
-our %EnumValueConst = :None(0), :Success(0); #, :Normal(0);
+our %EnumValueConst = :None(0), :Success(0), :Insert(0), :Delete(1), :Normal(0), :Off(0), :On(1);
 
 #| Enum packages not exported by default due to inter-module
 #| or internal namespace conflicts.
@@ -22,6 +21,7 @@ our %EnumExports =
     'Input::NotifyDetail' => (:inputnotifyenum,),  # vs XProto
     'RandR::ModeFlag' => (:modeflagenum,),         # vs XF86Vidmode
     'RandR::Transform' => (:transformenum,),       # vs Render
+    'DRI2::EventType' => (:eventtypeenum,),        # vs xkb
 ;
 
 #| Enums which do not get exported under the ":enums" tag
@@ -56,13 +56,17 @@ our %EnumValueExports =
     'Input::TouchEventFlags' => (:XI2enums,),
     'Input::TouchOwnershipFlags' => (:XI2enums,),
     'Input::FeedbackClass' => (:feedbackenums,),   # vs XProto
-    'Input::XIEventMask' => (:evmaskenums,),       # vs XProto. Maybe just a utility combiner if values all consistent with event numbers
+    'Input::XIEventMask' => (:evmaskenums,),       # vs XProto
+    'Input::ValuatorMode' => (:valuatorenums),     # vs Sync vs xkb
+    'Input::Device' => (:deviceenums),             # vs XProto vs xkb
 
     'XProto::NotifyMode' => (:notifyenums,),
     'XProto::NotifyDetail' => (:notifyenums,),
-    'XProto::KB' => (:kbenums,),                  # internal conflict
-    'XProto::Exposures' => (:exposureenums,),     # internal conflict
-    'XProto::Blanking' => (:blankingenums,),     # internal conflict
+    'XProto::KB' => (:kbenums,),                   # internal conflict
+    'XProto::Exposures' => (:exposureenums,),      # internal conflict
+    'XProto::Blanking' => (:blankingenums,),       # internal conflict
+    'XProto::ModMask' => (:modmaskenums,),         # internal conflict use subset
+    'XProto::MapIndex' => (:mapindexenums,),       # internal conflict
 
 
     'Present::Option' => (:optionenums,),
@@ -74,10 +78,14 @@ our %EnumValueExports =
     'xkb::BellClassResult' => (:bellresenums,),   # internal maybe use a subset?
     'xkb::BellClass' => (:bellenums,),            # internal maybe use a subset?
     'xkb::ID' => (:idenums,),                     # internal maybe use a subset?
+    'xkb::SwitchScreenFlag' => (:switchsenums,),  # vs Sync vs Input
+    'xkb::Groups' => (:groupssenums,),            # vs XProto vs Input
     'Render::PictOp'  => (:pictopenums,),         # vs XProto
     'Render::SubPixel'  => (:subpixenums,),       # vs RandR
     'Xv::GrabPortStatus' => (:grabenums,),        # vs XProto vs RandR
+    'Xv::VideoNotifyReason' => (:notifyenums,),   # vs XProto
     'Sync::ALARMSTATE' => (:alarmenums,),         # XProto
+    'DRI2::EventType' => (:eventtypeenums,),      # vs xkb
 
 ;
 
@@ -98,5 +106,8 @@ our %RequestExports =
     'XF86Dri::GetDeviceInfo' => (:direq,),
     'Xinerama::GetState' => (:gsreq,),
     # Things Glx thought it was a good idea to mimic
-    'Glx::CreateWindow' => (:xproto,),
+    'Glx::CreateWindow' => (),
+
+    'DRI2::CopyRegion' => (:copyregion,),   # vs XFixes
+
 ;
