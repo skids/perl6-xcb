@@ -857,7 +857,7 @@ our role Selector [Int $opcode] is export {
     method getrq (uint32 $from --> Request) {...};
 
 #    #| extract the event-mask from the $reply to the request made by .getrq
-    method mask (Reply $reply --> uint32) {...};
+    method replymask (Reply $reply --> uint32) {...};
 }
 
 

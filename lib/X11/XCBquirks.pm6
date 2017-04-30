@@ -6,10 +6,20 @@ unit package X11::XCBquirks;
 # but also available as a module for the purposes of
 # documentation, or perhaps for programmatic uses.
 
-# Enum name/value mappings whose names should be prefixed with
-# their module name, or if they stand alone in an enum with
-# no other values, eliminated entirely.
-our %EnumValueConst = :None(0), :Success(0), :Insert(0), :Delete(1), :Normal(0), :Off(0), :On(1);
+#| Enum values that are too common, and their common value.
+#| Instead, a constant with this name and value is provided by
+#| XProto.  If the value appears alone in an Enum, that Enum
+#| is eliminated.  Otherwise, a stand-in with the name of the
+#| whole enum prefixed takes its place.  Note that some
+#| enum values with these names exists with different
+#| integer values... in that case, the stand-in must be used
+#| instead of the constant.
+#|
+#| Example: You can use either C<On>, or C<LedModeOn> for 0,
+#| but you must use C<DPMSModeOn> if you want 1.
+our %EnumValueConst =
+    :None(0), :Success(0), :Insert(0), :Delete(1), :Normal(0),
+    :Off(0), :On(1);
 
 #| Enum packages not exported by default due to inter-module
 #| or internal namespace conflicts.
@@ -80,6 +90,8 @@ our %EnumValueExports =
     'xkb::ID' => (:idenums,),                     # internal maybe use a subset?
     'xkb::SwitchScreenFlag' => (:switchsenums,),  # vs Sync vs Input
     'xkb::Groups' => (:groupssenums,),            # vs XProto vs Input
+    'xkb::BoolCtrlsHigh' => (:ctrlshienums,),     # internal conflict
+    'xkb::BoolCtrlsLow' => (:ctrlsloenums,),      # internal conflict
     'Render::PictOp'  => (:pictopenums,),         # vs XProto
     'Render::SubPixel'  => (:subpixenums,),       # vs RandR
     'Xv::GrabPortStatus' => (:grabenums,),        # vs XProto vs RandR
@@ -111,3 +123,136 @@ our %RequestExports =
     'DRI2::CopyRegion' => (:copyregion,),   # vs XFixes
 
 ;
+
+
+# The rest verges on mission creep for a quirks file, but
+# each of these also serves to eliminate namespace conflicts.
+
+#| Enums occluded behind sets of classes.  This avoids name
+#| clashes between the enum values and the classes they are
+#| used to choose.  To do this we simply have each class's
+#| type object return the enum value's integer value when
+#| numified, and add a few other bits of glue to emulate
+#| most of the rest of the behaviors expected of an enum.
+our @Occludes =
+    "randr" => (
+        :generic<NotifyData>, :class<NotifyData>, :envelope<NotifyEvent>,
+        :typer<subCode>, :typee<u>, :enum<Notify>
+    ),
+    "xkb"   => (
+        :generic<SIAction>, :class<Action>,
+        :typer<type>, :typee<data>, :enum<SAType>,
+        :toenum({ $_ ~~ /^SA(.*)$/; my $it = $/[0].Str; $it ~~ s/IsoLock/ISOLock/; $it }),
+        :totype({ $_ ~~ s/ISOLock/IsoLock/; "SA$_" })
+    ),
+    "xkb"   => (
+        :generic<CommonBehavior>, :class<Behavior>,
+        :typer<type>, :typee<data>, :enum<BehaviorType>,
+        :toenum({ $_ ~~ /^(.*?)Behavior$/; $/[0].Str}),
+        :torole({ $_ ~~ /(.*?)\d*$/; $/[0] ~ "Behavior" }),
+        :totype({ $_ ~ "Behavior" })
+    )
+;
+
+my $i = 0;
+our %Selectors =
+     # xproto must be first here so it gets Selector[0]
+     "xproto" => qq:to<EOXP>,
+          our class EventSelector does Selector[{$i++}] \{
+              method setrq (\$window, \$event-mask) \{
+                  ChangeWindowAttributesRequest.new(:\$window,
+                      :value_list(CWEnum::CWEventMask, \$event-mask)
+                  )
+              }
+              method getrq (\$) \{ } # TODO
+              method replymask (\$) \{ } # TODO
+          }
+          EOXP
+     "xfixes" => qq:to<EOXF>,
+          # In this case, pass an instance with the receiver :window
+          our class EventSelector does Selector[{$i}] \{
+              has \$\.window;
+              method opcode \{ (\$\.window +< 8) +| {$i++} }
+              method setrq (\$selection, \$event_mask) \{
+                  SelectSelectionInputRequest.new(
+                      :\$\.window, :\$selection, :\$event_mask
+                  )
+              }
+              method getrq (\$) \{ } # TODO
+              method replymask (\$) \{ } # TODO
+          }
+          EOXF
+     "screensaver" => qq:to<EOSS>,
+          our class EventSelector does Selector[{$i++}] \{
+              method setrq (\$drawable, \$event_mask) \{
+                  ScreenSaverSelectInputRequest.new(:\$drawable,:\$event_mask)
+              }
+              method getrq (\$) \{ } # TODO
+              method replymask (\$) \{ } # TODO
+          }
+          EOSS
+     "randr" => qq:to<EORR>,
+          #| Instead of an enum, C<\%NotifyMask> maps the objects representing
+          #| selectable events directly to bit values.  Note there are
+          #| actually only two events, C<RandRScreenChangeEvent> and
+          #| C<RandRNotifyEvent>.  The latter packs a number of variant
+          #| structures.  Either the former event, or the structures
+          #| that do the NotifyData role for the latter event may be
+          #| used as keys here.  Or you can also pass a list of them to
+          #| C<RandR::EventSelector.mask> and let it do the math.
+          our \%NotifyMask is export(:DEFAULT, :selector) := :\{
+              RandRScreenChangeNotifyEvent => 1,
+              CrtcChange => 2,
+              OutputChange => 4,
+              OutputProperty => 8,
+              ProviderChange => 16,
+              ProviderProperty => 32,
+              ResourceChange => 64
+          };
+          #| Mid-level utility class for selecting events from RandR.
+          our class EventSelector does Selector[{$i}] \{
+              #| For use by C<X11> module's C<Connection.follow> method,
+              #| or can be used to keep track of windows from which
+              #| events have been selected.  Not automatically used
+              #| by the setrq method... use C<.request> for that.
+              has \$\.window;
+              #| (class or instance method)
+              #| Get the mask value of a selectable event object
+              method maskval (\$thing) \{ \%NotifyMask\{\$thing} }
+
+              #| (class or instance method)
+              #| Get the mask bit position of a selectable event object
+              method maskbit (\$thing) \{
+                  given \$thing \{
+                      when NotifyData \{ +\$thing + 1 }
+                      when RandRScreenChangeNotifyEvent \{ 0 }
+                      default \{ Nil }
+                  }
+              }
+              #| (class or instance method)
+              #| Get an event mask selecting all provided event objects
+              my method mask (*\@things) \{
+                  [+|] \@things.map: \{ self.maskval(\$_) }
+              }
+
+              #| For use by C<X11> module's C<Connection.follow> method.
+              method opcode \{ (\$\.window +< 8) +| {$i++} }
+
+              #| (class or instance method)
+              #| Build a request to have events matching C<\$event_mask>
+              #| occurring on the offered C<\$drawable> delivered to
+              #| a connection.
+              method setrq (\$drawable, \$event_mask) \{
+                  RandRSelectInputRequest.new(:\$drawable,:\$event_mask)
+              }
+              #| Build a request to have events corresponding to the
+              #| offered event objects when they occur on C<\$\.window>
+              method request (EventSelector:D, *\@things) \{
+                  self.setrq(\$\.window, self.mask(\@things))
+              }
+              method getrq (\$) \{ } # TODO
+              method replymask (\$) \{ } # TODO
+          }
+          EORR
+;
+

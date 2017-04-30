@@ -253,26 +253,10 @@ class occlude {
     }
 }
 
-# This part has to be done by hand... information for each
-# self-multiplexed union in each module
 my %Occludes is default(|());
-%Occludes.append:
-    "randr" => ( occlude.new(:generic<NotifyData>, :class<NotifyData>,
-                             :envelope<NotifyEvent>,
-                             :typer<subCode>, :typee<u>, :enum<Notify>)
-               ),
-    "xkb"   => ( occlude.new(:generic<SIAction>, :class<Action>,
-                             :typer<type>, :typee<data>, :enum<SAType>,
-                             :toenum({ $_ ~~ /^SA(.*)$/; my $it = $/[0].Str; $it ~~ s/IsoLock/ISOLock/; $it }),
-                             :totype({ $_ ~~ s/ISOLock/IsoLock/; "SA$_" }))
-               ),
-    "xkb"   => ( occlude.new(:generic<CommonBehavior>, :class<Behavior>,
-                             :typer<type>, :typee<data>, :enum<BehaviorType>,
-                             :toenum({ $_ ~~ /^(.*?)Behavior$/; $/[0].Str}),
-                             :torole({ $_ ~~ /(.*?)\d*$/; $/[0] ~ "Behavior" }),
-                             :totype({ $_ ~ "Behavior" }))
-               )
-;
+%Occludes.append: @X11::XCBquirks::Occludes.map: -> (:$key, :$value) {
+    $key => occlude.new(|%$value)
+};
 
 class mod {
     has $.xml;
@@ -740,14 +724,13 @@ sub MakeEnums ($mod) {
                     CursorNotifyMask NotifyMask SetOfGroup
                     xkbControl NameDetail SAIsoLockNoAffect>
             or $mod.cname eq "xkb" and $from eq any <EventType>;
-        return $item ~ "High" if $from eq 'BoolCtrlsHigh';
-        return $item ~ "Low" if $from eq 'BoolCtrlsLow';
         return substr($from,0,*-5) ~ $item if $from
             eq any <IMModsWhich IMGroupsWhich>;
         return substr($from,0,3) ~ $item if $from
             eq any <NKNDetail GBNDetail>;
         return $from ~ $item if $from
             eq any <SAType>;
+
         return $item ~ "Notify" if $from eq "Notify" and
             $mod.cname eq "randr";
 
@@ -2979,45 +2962,7 @@ sub MakeRequests($mod) {
 }
 
 sub MakeEpilogue($mod) {
-    my $i = 0;
-    my %selectors =
-         "xproto" => qq:to<EOXP>,
-              our class EventSelector does Selector[{$i++}] \{
-                  method setrq (\$window, \$event-mask) \{
-                      ChangeWindowAttributesRequest.new(:\$window,
-                          :value_list(CWEnum::CWEventMask, \$event-mask)
-                      )
-                  }
-                  method getrq (\$) \{ } # TODO
-                  method mask (\$) \{ } # TODO
-              }
-              EOXP
-         "xfixes" => qq:to<EOXF>,
-              # In this case, pass an instance with the receiver :window
-              our class EventSelector does Selector[{$i}] \{
-                  has \$\.window;
-                  method opcode \{ (\$\.window +< 8) +| {$i++} }
-                  method setrq (\$selection, \$event_mask) \{
-                      SelectSelectionInputRequest.new(
-                          :\$\.window, :\$selection, :\$event_mask
-                      )
-                  }
-                  method getrq (\$) \{ } # TODO
-                  method mask (\$) \{ } # TODO
-              }
-              EOXF
-         "screensaver" => qq:to<EOSS>,
-              our class EventSelector does Selector[{$i++}] \{
-                  method setrq (\$drawable, \$event_mask) \{
-                      ScreenSaverSelectInputRequest.new(:\$drawable,:\$event_mask)
-                  }
-                  method getrq (\$) \{ } # TODO
-                  method mask (\$) \{ } # TODO
-              }
-              EOSS
-         ;
-
-    $mod.epilogue = %selectors{$mod.cname} // "";
+    $mod.epilogue = %X11::XCBquirks::Selectors{$mod.cname} // "";
 }
 
 sub Output ($mod) {

@@ -1096,7 +1096,7 @@ our class Window is export {
         # a ChangeWindowAttributesRequest.
         my class CreateWindowSelector does Selector[0] {
             method getrq ($) { Nil };
-            method mask ($) { Nil };
+            method replymask ($) { Nil };
             method setrq ($,$) { $cwrq }
         }
         $c.follow($wid.value, %value_list{CWEventMask}, CreateWindowSelector);
