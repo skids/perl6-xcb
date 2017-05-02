@@ -6,6 +6,11 @@ unit package X11::XCBquirks;
 # but also available as a module for the purposes of
 # documentation, or perhaps for programmatic uses.
 
+# Note that currently the export tags are not carefully chosen
+# and in fact are so badly named they will be changed.  For
+# now the namespace detangling effort just needs these exports
+# suppressed, naming them sanely will come later.
+
 #| Enum values that are too common, and their common value.
 #| Instead, a constant with this name and value is provided by
 #| XProto.  If the value appears alone in an Enum, that Enum
@@ -21,6 +26,14 @@ our %EnumValueConst =
     :None(0), :Success(0), :Insert(0), :Delete(1), :Normal(0),
     :Off(0), :On(1);
 
+#| Enums we just skip because they are not needed after
+#| occlusions and Selectors.
+
+our %EnumSkips =
+    'Present::Event' => True,      # Occluded
+    'Present::EventMask' => True,  # replaced by Present::EventSelector.mask
+;
+
 #| Enum packages not exported by default due to inter-module
 #| or internal namespace conflicts.
 our %EnumExports =
@@ -31,7 +44,9 @@ our %EnumExports =
     'Input::NotifyDetail' => (:inputnotifyenum,),  # vs XProto
     'RandR::ModeFlag' => (:modeflagenum,),         # vs XF86Vidmode
     'RandR::Transform' => (:transformenum,),       # vs Render
+    'RandR::Connection' => (:connectionenum,),     # vs X11.pm6
     'DRI2::EventType' => (:eventtypeenum,),        # vs xkb
+    'Glx::GC' => (),                               # vs XProto
 ;
 
 #| Enums which do not get exported under the ":enums" tag
@@ -98,7 +113,6 @@ our %EnumValueExports =
     'Xv::VideoNotifyReason' => (:notifyenums,),   # vs XProto
     'Sync::ALARMSTATE' => (:alarmenums,),         # XProto
     'DRI2::EventType' => (:eventtypeenums,),      # vs xkb
-
 ;
 
 
@@ -249,6 +263,72 @@ our %Selectors =
               #| offered event objects when they occur on C<\$\.window>
               method request (EventSelector:D, *\@things) \{
                   self.setrq(\$\.window, self.mask(\@things))
+              }
+              method getrq (\$) \{ } # TODO
+              method replymask (\$) \{ } # TODO
+          }
+          EORR
+     "present" => qq:to<EORR>,
+          #| Instead of an enum, C<\%EventMask> maps the objects representing
+          #| selectable events directly to bit values. Or you can also pass a
+          #| list of them to C<RandR::EventSelector.mask> and let it do the math.
+          our \%EventMask is export(:DEFAULT, :selector) := :\{
+              PresentConfigureNotifyXGEvent => 1,
+              PresentCompleteNotifyXGEvent => 2,
+              PresentIdleNotifyXGEvent => 4,
+              PresentRedirectNotifyXGEvent => 8
+          };
+          #| Mid-level utility class for selecting events from Present.
+          our class EventSelector does Selector[{$i}] \{
+              #| For use by C<X11> module's C<Connection.follow> method,
+              #| or can be used to keep track of windows from which
+              #| events have been selected.  Not automatically used
+              #| by the setrq method... use C<.request> for that.
+              has \$\.window;
+
+              #| Present is a newer module that leaves a way for the
+              #| user to do what the C<X11> module's C<Connection.follow>
+              #| does to track how many times an event has been selected,
+              #| by allowing an extra unique id to be attached to each
+              #| selection.  It will also echo them back in the received
+              #| events.
+	      has \$\.eid = 0;
+
+              #| (class or instance method)
+              #| Get the mask value of a selectable event object
+              method maskval (\$thing) \{ \%EventMask\{\$thing} }
+
+              #| (class or instance method)
+              #| Get the mask bit position of a selectable event object
+              method maskbit (\$thing) \{
+                  given \$thing \{
+                      when XGEvent \{ \$thing.event_code + 1 }
+                      default \{ Nil }
+                  }
+              }
+              #| (class or instance method)
+              #| Get an event mask selecting all provided event objects
+              my method mask (*\@things) \{
+                  [+|] \@things.map: \{ self.maskval(\$_) }
+              }
+
+              #| For use by C<X11> module's C<Connection.follow> method.
+              method opcode \{ (\$\.window +< 40) +| (\$\.eid +< 8) +| {$i++} }
+
+              #| (class or instance method)
+              #| Build a request to have events matching C<\$event_mask>
+              #| occurring on the offered C<\$drawable> delivered to
+              #| a connection.
+              method setrq (\$drawable, \$event_mask, :\$eid = 0) \{
+                  PresentSelectInputRequest.new(
+                      :\$drawable,:\$event_mask,:\$eid
+                  )
+              }
+
+              #| Build a request to have events corresponding to the
+              #| offered event objects when they occur on C<\$\.window>
+              method request (EventSelector:D, *\@things, :\$eid) \{
+                  self.setrq(\$\.window, self.mask(\@things), :\$eid)
               }
               method getrq (\$) \{ } # TODO
               method replymask (\$) \{ } # TODO

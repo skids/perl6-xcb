@@ -650,8 +650,6 @@ sub MakeEnums ($mod) {
     my sub fix_name($enum) {
         return $mod.modname ~ $enum
             if $mod.cname eq "present" and $enum eq any <Event EventMask>
-            or $mod.cname eq "randr"   and $enum eq any <Connection>
-            or $mod.cname eq "glx"     and $enum eq any <GC>
             or $enum eq any <Control Cursor>;
 
         return "GCField" if $mod.cname eq "xproto" and $enum eq any <GC>;
@@ -690,7 +688,7 @@ sub MakeEnums ($mod) {
 # Instead add it to the post-scope explicit EXPORTs
             @res[1] = '';
 
-            my $evc = "our constant {$enum.attribs<name>} = ::X11::XCB::{$ename}Enum";
+            my $evc = "our constant {$enum.attribs<name>} = ::X11::XCB::{$ename}Enum::{$enum.attribs<name>}";
             for @(@res[0]) -> $eve {
                 $mod.expexp{"EXPORT::" ~ $eve.key} ~= "$evc;\n";
             }
@@ -754,6 +752,7 @@ sub MakeEnums ($mod) {
     for $mod.xml.root.elements(:TAG<enum>) -> $e {
         my $ename = $e.attribs<name>;
 
+	next if %X11::XCBquirks::EnumSkips{$mod.modname ~ $ename}:exists;
 	# Eliminate silly single-value enums
 	if $e.elements.elems == 1 {
             with %X11::XCBquirks::EnumValueConst{$e.elements[0].attribs<name>}
