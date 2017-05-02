@@ -1151,7 +1151,7 @@ our class GC is export {
     has Resource $.cid;
     has $.drawable;
 
-    import GCFieldEnum :enums;
+    import GCparamEnum :enums;
 
     method new (Connection $c, :$drawable!,
                 *%ValueList (
@@ -1185,15 +1185,15 @@ our class GC is export {
         my $drawableid = 
            $drawable ~~ Window ?? $drawable.wid.value !! $drawable; 
 
-        my Any %value_list{GCField} =
+        my Any %value_list{GCparam} =
             GCForeground, $c.Setup.roots[0].black_pixel,
             GCBackground, $c.Setup.roots[0].white_pixel;
 
-        if +%ValueList{GCField.enums.keys} {
+        if +%ValueList{GCparam.enums.keys} {
             %value_list = |%value_list, |(%ValueList.kv.map:
                 -> $k, $v {
-                    if GCField.enums{"GC$k"}:exists {
-                        |(GCField(GCField.enums{"GC$k"}), $v)
+                    if GCparam.enums{"GC$k"}:exists {
+                        |(GCparam(GCparam.enums{"GC$k"}), $v)
                     }
                 }
             )

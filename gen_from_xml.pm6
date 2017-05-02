@@ -649,13 +649,7 @@ sub MakeEnums ($mod) {
     # Fixup/perlify for enum type names that conflict
     my sub fix_name($enum) {
         return $mod.modname ~ $enum
-            if $mod.cname eq "present" and $enum eq any <Event EventMask>
-            or $enum eq any <Control Cursor>;
-
-        return "GCField" if $mod.cname eq "xproto" and $enum eq any <GC>;
-
-        return "ScreenSaverState"
-            if $enum eq "ScreenSaver";
+            if $enum eq any <Control Cursor>;
 
         return $enum;
     }
@@ -733,7 +727,7 @@ sub MakeEnums ($mod) {
             $mod.cname eq "randr";
 
         return "CW$item"      if $from eq any <CW ConfigWindow>;
-        return "GC$item"      if $from eq any <GCField>;
+        return "GC$item"      if $from eq any <GCparam>;
 
         return "$from$item"
             if $from eq any <
@@ -752,7 +746,7 @@ sub MakeEnums ($mod) {
     for $mod.xml.root.elements(:TAG<enum>) -> $e {
         my $ename = $e.attribs<name>;
 
-	next if %X11::XCBquirks::EnumSkips{$mod.modname ~ $ename}:exists;
+	next if %X11::XCBquirks::EnumSkips{$mod.modname ~ '::' ~ $ename}:exists;
 	# Eliminate silly single-value enums
 	if $e.elements.elems == 1 {
             with %X11::XCBquirks::EnumValueConst{$e.elements[0].attribs<name>}
@@ -767,6 +761,9 @@ sub MakeEnums ($mod) {
         }
         else {
             $ename = fix_name($ename);
+	    with %X11::XCBquirks::EnumRename{$mod.modname ~ "::" ~ $ename} {
+                $ename = $_;
+            }
 	    $mod.renums{$e.attribs<name>.Str} = ($ename => { });
             (my $export_ext, my $export_int) = fix_export($mod,$e);
 

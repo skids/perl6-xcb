@@ -34,12 +34,19 @@ our %EnumSkips =
     'Present::EventMask' => True,  # replaced by Present::EventSelector.mask
 ;
 
+#| Enums that cannot be patched up through exports and are badly
+#| enough named to merit renaming them.
+our %EnumRename =
+    'XProto::GC' => 'GCparam',     # vs X11.pm6
+;
+
 #| Enum packages not exported by default due to inter-module
 #| or internal namespace conflicts.
 our %EnumExports =
     # Clash in Notify related enums between XProto and Input
     'XProto::NotifyMode' => (:xprotonotifyenum,),  # vs Input
     'XProto::NotifyDetail' => (:xprotonotifyenum,),# vs Input
+    'XProto::ScreenSaver' => (),                   # vs ScreenSaver
     'Input::NotifyMode' => (:inputnotifyenum,),    # vs XProto
     'Input::NotifyDetail' => (:inputnotifyenum,),  # vs XProto
     'RandR::ModeFlag' => (:modeflagenum,),         # vs XF86Vidmode
