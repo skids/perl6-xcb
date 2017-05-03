@@ -554,6 +554,7 @@ sub MakeMod ($xml) {
     } else {
         my $cheez;
 	for %X11::XCBquirks::EnumValueConst -> (:$key, :$value) {
+            next if $key =:= $value;
 	    $cheez ~= "constant $key is export(:internal, :enums) = $value;\n"
 	}
         $prologue ~= qq:to<EOE>;
@@ -631,7 +632,7 @@ sub MakeTypeDefs ($mod) {
     for $mod.xml.root.elements(:TAG<typedef>) -> $e {
         %nctypemap{$e.attribs<newname>} = $e.attribs<oldname>;
         my $t = NCtype($e.attribs<oldname>);
-        # XXX figure this out without a manual list
+        # XXX figure this out from %X11::XCBquirks::Occludes
         if ($e.attribs<newname> ~~ /Behavior|^SA/) {
             $mod.subclasses{$e.attribs<newname>} = $e.attribs<oldname>;
         }
@@ -646,30 +647,11 @@ sub MakeTypeDefs ($mod) {
 
 sub MakeEnums ($mod) {
 
-    # Fixup/perlify for enum type names that conflict
-    my sub fix_name($enum) {
-        return $mod.modname ~ $enum
-            if $enum eq any <Control Cursor>;
-
-        return $enum;
-    }
-
     # Keep some things in their own namespace rather than munging them
     my sub fix_export($mod, $enum) {
         my @elements = $enum.elements(:TAG<item>);
         my @res = $(:DEFAULT,), " is export(:enums)";
 	my $ename = $mod.modname ~ "::" ~ $enum.attribs<name>;
-
-        # Perl6 things that can be overidden, but avoid surprises
-        # TODOP6: will have to go look for more of these pre-publication
-        # TODOP6: better exemption logic here rather than cherry picking
-        if $ename ne "XProto::CW" {
-            if @elements.first(*.attribs<name> eq any <
-                 Cursor
-                >) {
-                @res[1] = " is export(:danger)";
-            }
-        }
 
         # conflicts within or between modules
 	with %X11::XCBquirks::EnumExports{$ename} {
@@ -734,7 +716,7 @@ sub MakeEnums ($mod) {
                 GrabMode LineStyle FillStyle CapStyle JoinStyle GC SA SAIsoLockFlag CP
             >
             or $item eq any <
-                Any Lock Control Pointer Cursor
+                Lock Control Pointer
             >
 	    or %X11::XCBquirks::EnumValueConst{$item}:exists;
 
@@ -751,7 +733,7 @@ sub MakeEnums ($mod) {
 	if $e.elements.elems == 1 {
             with %X11::XCBquirks::EnumValueConst{$e.elements[0].attribs<name>}
             {
-	        next if $_ == +$e.elements[0].nodes[0].text;
+	        next if $_.isa(Int) and $_ == +$e.elements[0].nodes[0].text;
             }
         }
 
@@ -760,7 +742,6 @@ sub MakeEnums ($mod) {
             $mod.enums.push($occlude.gluecode);
         }
         else {
-            $ename = fix_name($ename);
 	    with %X11::XCBquirks::EnumRename{$mod.modname ~ "::" ~ $ename} {
                 $ename = $_;
             }

@@ -22,9 +22,11 @@ unit package X11::XCBquirks;
 #|
 #| Example: You can use either C<On>, or C<LedModeOn> for 0,
 #| but you must use C<DPMSModeOn> if you want 1.
+#|
+#| notable exception: "Any" does not get a global constant
 our %EnumValueConst =
     :None(0), :Success(0), :Insert(0), :Delete(1), :Normal(0),
-    :Off(0), :On(1);
+    :Off(0), :On(1), :Any<Any>;
 
 #| Enums we just skip because they are not needed after
 #| occlusions and Selectors.
@@ -54,6 +56,8 @@ our %EnumExports =
     'RandR::Connection' => (:connectionenum,),     # vs X11.pm6
     'DRI2::EventType' => (:eventtypeenum,),        # vs xkb
     'Glx::GC' => (),                               # vs XProto
+    'Test::Cursor' => (),                          # vs Perl6 core vs XProto
+    'XProto::Cursor' => (),                        # vs Perl6 core vs Test
 ;
 
 #| Enums which do not get exported under the ":enums" tag
@@ -114,6 +118,7 @@ our %EnumValueExports =
     'xkb::Groups' => (:groupssenums,),            # vs XProto vs Input
     'xkb::BoolCtrlsHigh' => (:ctrlshienums,),     # internal conflict
     'xkb::BoolCtrlsLow' => (:ctrlsloenums,),      # internal conflict
+    'xkb::Control' => (:controlenums,),           # internal conflict
     'Render::PictOp'  => (:pictopenums,),         # vs XProto
     'Render::SubPixel'  => (:subpixenums,),       # vs RandR
     'Xv::GrabPortStatus' => (:grabenums,),        # vs XProto vs RandR
