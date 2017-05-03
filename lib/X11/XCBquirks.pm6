@@ -154,6 +154,10 @@ our %RequestExports =
     'Glx::CreateWindow' => (),
 
     'DRI2::CopyRegion' => (:copyregion,),   # vs XFixes
+    'xkb::Bell' => (),                      # vs XProto
+    'SELinux::ListProperties' => (),        # vs XProto
+    'Render::CreateCursor' => (),           # vs XProto
+    'BigRequests::Enable' => (:enable,),    # vs DPMS ... bigreq more common but will be automated
 
     'Print::SelectInput' => (),             # common module interface
     'Shape::SelectInput' => (),             # common module interface
@@ -165,10 +169,21 @@ our %RequestExports =
 ;
 
 #| Older xcbxml uses valueparam tags that need help finding
-#| their correspondin enum
+#| their corresponding enum class.  This table patches up that
+#| missing link.  Newer xcbxml uses switch statements that
+#| explicitly state the enum class so it is not needed there.
 our %vpmap =
-    'Print::SelectInputRequest' => 'EvMask',
-    'Print::SelectInputReply'   => 'EvMask',
+    'XProto::CreateWindow'           => 'CW',
+    'XProto::ConfigureWindow'        => 'ConfigWindow',
+    'XProto::ChangeWindowAttributes' => 'CW',
+    'XProto::CreateGC'               => 'GC',
+    'XProto::ChangeGC'               => 'GC',
+    'XProto::ChangeKeyboardControl'  => 'KB',
+    'ScreenSaver::SetAttributes'     => 'xproto:CW',
+    'Render::CreatePicture'          => 'CP',
+    'Render::ChangePicture'          => 'CP',
+    'Print::SelectInputRequest'      => 'EvMask',
+    'Print::SelectInputReply'        => 'EvMask',
 ;
 
 # The rest verges on mission creep for a quirks file, but

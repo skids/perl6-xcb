@@ -469,6 +469,63 @@ sub makemeth_child_structs(params $p, :$indent = 0) {
     else { "" }
 }
 
+
+# When a field is repesented in the Perl6 object as an object that
+# has an embedded item count (e.g. Str, Buf, or Array) and the
+# length of that object is sent on the wire, this subroutine is used
+# to eliminate the length field which was added to the Perl6 object
+# before we knew we had such an object, and automatically fills
+# it out based on the embedded item count when a Perl6 object is
+# turned into packet data.
+sub glean_item_count($p, $counted, $count) {
+
+    # Remove the length field from the Perl6 object attributes
+    $p{$count}.p_attr = "# $count not needed in P6 object";
+
+    # When converting from Perl6 to packet data, find the item
+    # count and do a sanity check that it will fit within the
+    # range of its packet field.
+    $p{$count}.p2c_init = qq:to<EOPC>;
+        my \${$count}___sizeof = \$p6.{$counted}.encode('utf8').bytes;
+        die ("Maximum field size exceeded")
+            if \${$count}___sizeof > {$count}___maxof;
+        EOPC
+
+    # Alter any code that appends arguments to the Perl6 object constructor
+    # so that it just supplies a local variable containing the item count.
+    # This is a bit tacky in that it assumes it knows exactly what that
+    # code looks like.  If we do not, just delete that code and hope.
+    my $c2p_len = $p{$count}.c2p_code;
+    if $c2p_len ~~ s/^.*?\"$count\"\s*\,// { # strip the '@args.append: "name",'
+        $p{$count}.c2p_code = qq:to<EOC1>;
+            # No p6 attribute $count to init but may need value in place
+            my \${$count}___inplace = $c2p_len;
+            EOC1
+    }
+    else {
+        $c2p_len = "";
+        $p{$count}.c2p_code = "# No p6 attribute $count to init";
+    }
+
+    # Alter the corresponding code used when creating packet data from
+    # a Perl6 object.  We have two scenarios: the ite count field is in
+    # the static (CStruct) part, or it is mixed in at a dynamic offset.
+    # We can tell which from comments the code generator left for us.
+#    if $p{$count}.c_attr ~~ /^\#/ {
+    if $p{$count}.c_attr ~~ /:s outside cstruct/ { # dynamic offset
+        # XXX maybe make a local here for cleaner looking code
+        my $lc = "self.{$counted}.encode('utf8').bytes";
+        $p{$count}.p2c_code ~~ s:g/\$\.$count <!before <alpha>|\d>/$lc/;
+    }
+    else {
+        $p{$count}.p2c_init ~= "\n\$\!$count = \${$count}___sizeof;"
+    }
+
+    $p{$count}.c2p_arg = |();
+
+    $c2p_len;
+}
+
 # Special quirks and workarounds
 my %quirks = "ClientMessageData" => &makeClientMessageData, "list:preserve_entries" => &makeParasiticList, "list:preserve" => &makeParasiticList;
 
@@ -816,8 +873,15 @@ multi sub build_op($f where {.name eq "value"}) {
 }
 
 sub build_equation($f) {
-   return "TODOP6 Not one root op" if $f.elements».name.join(" ") ne any <op unop>;
-   build_op($f.elements[0]);
+    return "TODOP6 Not one root op" if $f.elements».name.join(" ") ne any <op unop>;
+    # Fight cheeze with cheeze. This goes away in later xcbxml.
+    if $f.gist ~~ /:s auto align pad after the list/ and
+        +$f.elements(:TAG<fieldref>, :RECURSE) == 1 {
+            '$pstruct.' ~ $f.elements(:TAG<fieldref>, :RECURSE)[0].contents.Str;
+    }
+    else {
+        build_op($f.elements[0]);
+    }
 }
 
 my %cstructs = "sync:INT64" => "Counter64", "Action" => "Action", "Behavior" => "Behavior", "NotifyData" => "NotifyData";
@@ -1093,7 +1157,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                     $p{$TODOP6}.p_attr = "# $TODOP6 complicated $_ ($eq) of {$f.attribs<type>}";
                 }
                 elsif $type eq any <char STRING8> {
-                    if $eq ~~ /pstruct\.<!before length<!alpha>>/ {
+                    if $eq ~~ /pstruct\.<!before [length|name_len] <!alpha>>/ {
                         $TODOP6++;
                         $p{$name}.c_attr = "# Dynamic layout: {$type}s $TODOP6 fields other than .length";
                     } else {
@@ -1115,7 +1179,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                         EOPC
                 }
                 elsif %cstructs{$type} -> $pt {
-                    if $eq ~~ /pstruct\.<!before length<!alpha>>/ {
+                    if $eq ~~ /pstruct\.<!before [length|name_len]<!alpha>>/ {
                         if %quirks{"list:$name"}:exists and %quirks{"list:$name"}($p, $f, :$padnum) {
                             succeed
                         }
@@ -1302,43 +1366,12 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                 my $frname = $fr.contents.Str;
                 if $f.attribs<type> eq "STRING8" or
                     $f.attribs<type> eq "char"
-                    # this is tacky -- for ImageText8
+                    # XXX this is tacky -- for ImageText8
                     and !($name eq "string" and $p<x>:exists) {
 
-                    # Go back and remove the _len field from perl6 attributes
-                    $p{$frname}.p_attr = "# $frname not needed in P6 object";
+                    my $c2p_len =
+                    glean_item_count($p, $name, $frname);
 
-                    $p{$frname}.p2c_init = qq:to<EOPC>;
-                        my \${$frname}___sizeof = \$p6.{$name}.encode('utf8').bytes;
-                        die ("Maximum field size exceeded")
-                            if \${$frname}___sizeof > {$frname}___maxof;
-                        EOPC
-
-                    my $c2p_len = $p{$frname}.c2p_code;
-                    if $c2p_len ~~ s/^.*?\"$frname\"\s*\,// {
-                        $p{$frname}.c2p_code = qq:to<EOC1>;
-                            # No p6 attribute $frname to init but may need value in place
-                            my \${$frname}___inplace = $c2p_len;
-                            EOC1
-                    }
-                    else {
-                        $c2p_len = "";
-                        $p{$frname}.c2p_code = "# No p6 attribute $frname to init";
-                    }
-                    if $p{$frname}.c_attr ~~ /^\#/ {
-                       my $lc = "self.{$name}.encode('utf8').bytes";
-                       if $p{$frname}.p2c_code ~~
-                           /\$\.$frname <!before <alpha>|\d>/ {
-                           $p{$frname}.p2c_code ~~
-                               s:g/\$\.$frname <!before <alpha>|\d>/$lc/;
-                       }
-                    }
-                    else {
-                        $p{$frname}.p2c_init ~=
-                            "\n\$\!$frname = \${$frname}___sizeof;"
-                    }
-
-                    $p{$frname}.c2p_arg = |();
                     $p{$name}.c_attr = "# Dynamic layout: chars";
                     $p{$name}.p_attr = "has \$.$name is rw;";
                     $p{$name}.p2c_code = qq:to<EOCC>;
@@ -1565,26 +1598,16 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
             # Replaced by "switch" but some people may be working
             # off older xml files.
 
-            # One of the deficiencies it had was not listing the
-            # enum of the mask bit values.  So we fix this up.
-            my %vpmap = (
-                :CreateWindow<CW>, :ChangeWindowAttributes<CW>,
-                :SetAttributes<xproto:CW>, :ConfigureWindow<ConfigWindow>,
-                :CreateGC<GC>, :ChangeGC<GC>, :ChangeKeyboardControl<KB>,
-                :CreatePicture<CP>, :ChangePicture<CP>
-            );
             my $parent = $f.parent;
             $parent = $parent.parent if $parent.name eq "reply";
             $parent = $parent.attribs<name>;
-            unless %vpmap{$parent}:exists or %X11::XCBquirks::vpmap{ $mod.modname ~ "::" ~ $parent}:exists {
+            unless %X11::XCBquirks::vpmap{"{$mod.modname}::$parent"}:exists {
                 $TODOP6++;
                 $p{$TODOP6}.c_attr = "# $TODOP6 unmapped valueparam";
                 $p{$TODOP6}.p_attr = "# $TODOP6 unmapped valueparam";
                 succeed;
             }
-            my $enum;
-            $enum = %X11::XCBquirks::vpmap{$mod.modname ~ "::" ~ $parent};
-            without $enum { $enum = %vpmap{$parent} }
+            my $enum = %X11::XCBquirks::vpmap{"{$mod.modname}::$parent"};
             my $renum = mod.renum($f, $enum);
             my $type = $f.attribs<value-mask-type>;
             my $name = $f.attribs<value-mask-name>;
@@ -1865,13 +1888,6 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
 sub GetOpcodes($mod) {
     for $mod.xml.root.elements(:TAG<request>) -> $req {
         my $name = $req.attribs<name>;
-        $name = $mod.modname ~ $name
-            if $mod.extension and $name eq "QueryVersion"
-            or $mod.extension and $name eq "CreateCursor"
-            or $mod.extension and $name eq "DestroyContext"
-            or $mod.extension and $name eq "GetVersion"
-            or $mod.extension and $name eq "QueryBestSize"
-            or $mod.cname eq "present"; # has really conflicty names
         $mod.opcodes{$req.attribs<opcode>} = $name;
     }
 }
@@ -2662,9 +2678,9 @@ sub MakeReplies($mod) {
         my $clname = $req.attribs<name>;
         $clname = $oname ~ $clname
             if $clname eq any <
-                DestroyContext QueryVersion QueryExtension ListProperties
-                CreateCursor GetVersion QueryBestSize Bell
-                Enable CreateContext ChangeSaveSet GetImage PutImage
+                DestroyContext QueryVersion QueryExtension
+                GetVersion QueryBestSize
+                CreateContext ChangeSaveSet GetImage PutImage
                 CreatePixmap
             > or $mod.cname eq "present"
               or ($clname ~~ /^Shm/) and $mod.cname eq "xv";
@@ -2874,9 +2890,9 @@ sub MakeRequests($mod) {
         my $clname = $req.attribs<name>;
         $clname = $oname ~ $clname
             if $clname eq any <
-                DestroyContext QueryVersion QueryExtension ListProperties
-                CreateCursor GetVersion QueryBestSize Bell
-                Enable CreateContext ChangeSaveSet GetImage PutImage
+                DestroyContext QueryVersion QueryExtension
+                GetVersion QueryBestSize
+                CreateContext ChangeSaveSet GetImage PutImage
                 CreatePixmap
             > or ($mod.cname eq "present" and $clname ne "SelectInput")
               or ($clname ~~ /^Shm/) and $mod.cname eq "xv";
