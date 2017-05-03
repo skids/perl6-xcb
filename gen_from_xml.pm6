@@ -1560,6 +1560,8 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
         }
         when "valueparam" {
             $dynsize = True;
+            my $mod = mod.of_xml($f);
+
             # Replaced by "switch" but some people may be working
             # off older xml files.
 
@@ -1569,19 +1571,20 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                 :CreateWindow<CW>, :ChangeWindowAttributes<CW>,
                 :SetAttributes<xproto:CW>, :ConfigureWindow<ConfigWindow>,
                 :CreateGC<GC>, :ChangeGC<GC>, :ChangeKeyboardControl<KB>,
-                :PrintInputSelected<EvMask>, :PrintSelectInput<EvMask>,
                 :CreatePicture<CP>, :ChangePicture<CP>
             );
             my $parent = $f.parent;
             $parent = $parent.parent if $parent.name eq "reply";
             $parent = $parent.attribs<name>;
-            unless (%vpmap{$parent}:exists) {
+            unless %vpmap{$parent}:exists or %X11::XCBquirks::vpmap{ $mod.modname ~ "::" ~ $parent}:exists {
                 $TODOP6++;
                 $p{$TODOP6}.c_attr = "# $TODOP6 unmapped valueparam";
                 $p{$TODOP6}.p_attr = "# $TODOP6 unmapped valueparam";
                 succeed;
             }
-            my $enum = %vpmap{$parent};
+            my $enum;
+            $enum = %X11::XCBquirks::vpmap{$mod.modname ~ "::" ~ $parent};
+            without $enum { $enum = %vpmap{$parent} }
             my $renum = mod.renum($f, $enum);
             my $type = $f.attribs<value-mask-type>;
             my $name = $f.attribs<value-mask-name>;
@@ -2660,7 +2663,7 @@ sub MakeReplies($mod) {
         $clname = $oname ~ $clname
             if $clname eq any <
                 DestroyContext QueryVersion QueryExtension ListProperties
-                CreateCursor GetVersion QueryBestSize SelectInput Bell
+                CreateCursor GetVersion QueryBestSize Bell
                 Enable CreateContext ChangeSaveSet GetImage PutImage
                 CreatePixmap
             > or $mod.cname eq "present"
@@ -2872,10 +2875,10 @@ sub MakeRequests($mod) {
         $clname = $oname ~ $clname
             if $clname eq any <
                 DestroyContext QueryVersion QueryExtension ListProperties
-                CreateCursor GetVersion QueryBestSize SelectInput Bell
+                CreateCursor GetVersion QueryBestSize Bell
                 Enable CreateContext ChangeSaveSet GetImage PutImage
                 CreatePixmap
-            > or $mod.cname eq "present"
+            > or ($mod.cname eq "present" and $clname ne "SelectInput")
               or ($clname ~~ /^Shm/) and $mod.cname eq "xv";
         my $isvoid = not $req.elements(:TAG<reply>);
 

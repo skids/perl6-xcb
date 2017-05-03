@@ -155,8 +155,21 @@ our %RequestExports =
 
     'DRI2::CopyRegion' => (:copyregion,),   # vs XFixes
 
+    'Print::SelectInput' => (),             # common module interface
+    'Shape::SelectInput' => (),             # common module interface
+    'Present::SelectInput' => (),           # common module interface
+    'XPrint::SelectInput' => (),            # common module interface
+    'Xevie::SelectInput' => (),             # common module interface
+    'RandR::SelectInput' => (),             # common module interface
+    'ScreenSaver::SelectInput' => (),       # common module interface
 ;
 
+#| Older xcbxml uses valueparam tags that need help finding
+#| their correspondin enum
+our %vpmap =
+    'Print::SelectInputRequest' => 'EvMask',
+    'Print::SelectInputReply'   => 'EvMask',
+;
 
 # The rest verges on mission creep for a quirks file, but
 # each of these also serves to eliminate namespace conflicts.
@@ -218,7 +231,7 @@ our %Selectors =
      "screensaver" => qq:to<EOSS>,
           our class EventSelector does Selector[{$i++}] \{
               method setrq (\$drawable, \$event_mask) \{
-                  ScreenSaverSelectInputRequest.new(:\$drawable,:\$event_mask)
+                  SelectInputRequest.new(:\$drawable,:\$event_mask)
               }
               method getrq (\$) \{ } # TODO
               method replymask (\$) \{ } # TODO
@@ -276,7 +289,7 @@ our %Selectors =
               #| occurring on the offered C<\$drawable> delivered to
               #| a connection.
               method setrq (\$drawable, \$event_mask) \{
-                  RandRSelectInputRequest.new(:\$drawable,:\$event_mask)
+                  SelectInputRequest.new(:\$drawable,:\$event_mask)
               }
               #| Build a request to have events corresponding to the
               #| offered event objects when they occur on C<\$\.window>
@@ -339,7 +352,7 @@ our %Selectors =
               #| occurring on the offered C<\$drawable> delivered to
               #| a connection.
               method setrq (\$drawable, \$event_mask, :\$eid = 0) \{
-                  PresentSelectInputRequest.new(
+                  SelectInputRequest.new(
                       :\$drawable,:\$event_mask,:\$eid
                   )
               }
