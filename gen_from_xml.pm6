@@ -700,8 +700,6 @@ sub MakeEnums ($mod) {
             or $mod.cname eq "xkb" and $from eq any <EventType>;
         return substr($from,0,*-5) ~ $item if $from
             eq any <IMModsWhich IMGroupsWhich>;
-        return substr($from,0,3) ~ $item if $from
-            eq any <NKNDetail GBNDetail>;
         return $from ~ $item if $from
             eq any <SAType>;
 
@@ -713,10 +711,10 @@ sub MakeEnums ($mod) {
 
         return "$from$item"
             if $from eq any <
-                GrabMode LineStyle FillStyle CapStyle JoinStyle GC SA SAIsoLockFlag CP
+                GC CP
             >
             or $item eq any <
-                Lock Control Pointer
+                Lock Pointer
             >
 	    or %X11::XCBquirks::EnumValueConst{$item}:exists;
 

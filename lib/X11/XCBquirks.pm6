@@ -26,7 +26,9 @@ unit package X11::XCBquirks;
 #| notable exception: "Any" does not get a global constant
 our %EnumValueConst =
     :None(0), :Success(0), :Insert(0), :Delete(1), :Normal(0),
-    :Off(0), :On(1), :Any<Any>;
+    :Off(0), :On(1),
+    :Any<Any>,              # no constant will be made
+    :Round(1), :Solid(0);   # not "too common" but easy to do here
 
 #| Enums we just skip because they are not needed after
 #| occlusions and Selectors.
@@ -103,7 +105,7 @@ our %EnumValueExports =
     'XProto::Blanking' => (:blankingenums,),       # internal conflict
     'XProto::ModMask' => (:modmaskenums,),         # internal conflict use subset
     'XProto::MapIndex' => (:mapindexenums,),       # internal conflict
-
+    'XProto::GrabMode' => (:grabmodeenums,),       # vs Input
 
     'Present::Option' => (:optionenums,),
     'RandR::ModeFlag' => (:modeflagenums,),       # vs XF86videomode
@@ -119,6 +121,10 @@ our %EnumValueExports =
     'xkb::BoolCtrlsHigh' => (:ctrlshienums,),     # internal conflict
     'xkb::BoolCtrlsLow' => (:ctrlsloenums,),      # internal conflict
     'xkb::Control' => (:controlenums,),           # internal conflict
+    'xkb::SAIsoLockFlag' => (:saisoenums,),       # internal conflict
+    'xkb::SA' => (:saenums,),                     # internal conflict
+    'xkb::NKNDetail' => (:nknenums,),             # internal conflict
+    'xkb::GBNDetail' => (:gbnenums,),             # internal conflict
     'Render::PictOp'  => (:pictopenums,),         # vs XProto
     'Render::SubPixel'  => (:subpixenums,),       # vs RandR
     'Xv::GrabPortStatus' => (:grabenums,),        # vs XProto vs RandR
@@ -136,7 +142,8 @@ our %StructExports =
     'XProto::Point' => (:DEFAULT, :structs, :internal),
     'Render::Transform' => (:DEFAULT, :structs, :internal),
     'Xv::ImageFormatInfo' => (:DEFAULT, :structs, :internal),
-    'RandR::ModeInfo' => (:modeinfo,),
+
+    'RandR::ModeInfo' => (:modeinfo,),            # vs XF86VideoMode
 ;
 
 #| Inter-module conflicts for Requests/Replies
