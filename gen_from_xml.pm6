@@ -477,7 +477,7 @@ sub makemeth_child_structs(params $p, :$indent = 0) {
 # before we knew we had such an object, and automatically fills
 # it out based on the embedded item count when a Perl6 object is
 # turned into packet data.
-sub glean_item_count($p, $counted, $count) {
+sub glean_item_count($p, $counted, $count, $how, :$revhow = "") {
 
     # Remove the length field from the Perl6 object attributes
     $p{$count}.p_attr = "# $count not needed in P6 object";
@@ -486,7 +486,7 @@ sub glean_item_count($p, $counted, $count) {
     # count and do a sanity check that it will fit within the
     # range of its packet field.
     $p{$count}.p2c_init = qq:to<EOPC>;
-        my \${$count}___sizeof = \$p6.{$counted}.encode('utf8').bytes;
+        my \${$count}___sizeof = \$p6.{$counted}$how;
         die ("Maximum field size exceeded")
             if \${$count}___sizeof > {$count}___maxof;
         EOPC
@@ -495,7 +495,7 @@ sub glean_item_count($p, $counted, $count) {
     # so that it just supplies a local variable containing the item count.
     # This is a bit tacky in that it assumes it knows exactly what that
     # code looks like.  If we do not, just delete that code and hope.
-    my $c2p_len = $p{$count}.c2p_code;
+    my $c2p_len = $p{$count}.c2p_code ~ $revhow;
     if $c2p_len ~~ s/^.*?\"$count\"\s*\,// { # strip the '@args.append: "name",'
         $p{$count}.c2p_code = qq:to<EOC1>;
             # No p6 attribute $count to init but may need value in place
@@ -511,10 +511,9 @@ sub glean_item_count($p, $counted, $count) {
     # a Perl6 object.  We have two scenarios: the ite count field is in
     # the static (CStruct) part, or it is mixed in at a dynamic offset.
     # We can tell which from comments the code generator left for us.
-#    if $p{$count}.c_attr ~~ /^\#/ {
     if $p{$count}.c_attr ~~ /:s outside cstruct/ { # dynamic offset
         # XXX maybe make a local here for cleaner looking code
-        my $lc = "self.{$counted}.encode('utf8').bytes";
+        my $lc = "self.{$counted}$how";
         $p{$count}.p2c_code ~~ s:g/\$\.$count <!before <alpha>|\d>/$lc/;
     }
     else {
@@ -1370,7 +1369,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                     and !($name eq "string" and $p<x>:exists) {
 
                     my $c2p_len =
-                    glean_item_count($p, $name, $frname);
+                    glean_item_count($p, $name, $frname, ".encode('utf8').bytes");
 
                     $p{$name}.c_attr = "# Dynamic layout: chars";
                     $p{$name}.p_attr = "has \$.$name is rw;";
@@ -1409,38 +1408,13 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
 
                     my $sz = $type eq "CHAR2B" ?? 2 !! 1;
 
-                    $p{$frname}.p2c_init = qq:to<EOPC>;
-                        die ("Oddly short buffer") if \$p6.{$name}.bytes % $sz;
-                        my \${$frname}___sizeof = \$p6.{$name}.bytes div $sz;
-                        die ("Maximum field size exceeded")
-                            if \${$frname}___sizeof > {$frname}___maxof;
-                        EOPC
+                    my $c2p_len =
+                    glean_item_count($p, $name, $frname, ".bytes div $sz", :revhow(" * $sz"));
 
-                    my $c2p_len = $p{$frname}.c2p_code;
-                    if $c2p_len ~~ s/^.*?\"$frname\"\s*\,// {
-                        $p{$frname}.c2p_code = qq:to<EOC1>;
-                            # No p6 attribute $frname to init but may need value in place
-                            my \${$frname}___inplace = $c2p_len * $sz;
-                            EOC1
-                    }
-                    else {
-                        $c2p_len = "";
-                        $p{$frname}.c2p_code = "# No p6 attribute $frname to init";
-                    }
-                    if $p{$frname}.c_attr ~~ /^\#/ {
-                       my $lc = "self.{$name}.bytes";
-                       if $p{$frname}.p2c_code ~~
-                           /\$\.$frname <!before <alpha>|\d>/ {
-                           $p{$frname}.p2c_code ~~
-                               s:g/\$\.$frname <!before <alpha>|\d>/$lc/;
-                       }
-                    }
-                    else {
-                        $p{$frname}.p2c_init ~=
-                            "\n\$\!$frname = \${$frname}___sizeof;"
-                    }
+                    # quietly for RT#131251
+                    quietly $p{$frname}.p2c_init [R~]=
+                        "die ('Oddly short buffer') if \$p6.{$name}.bytes % $sz;\n";
 
-                    $p{$frname}.c2p_arg = |();
                     $p{$name}.c_attr = "# Dynamic layout: chars";
                     $p{$name}.p_attr = "has \$.$name is rw;";
                     $p{$name}.p2c_code = qq:to<EOCC>;
@@ -1475,34 +1449,9 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                 > {
                     my $nct = NCtype($type);
 
-                    # Go back and remove the _len field from perl6 attributes
-                    $p{$frname}.p_attr = "# $frname not needed in P6 object";
-                    $p{$frname}.p2c_init = qq:to<EOPI>;
-                        die ("Maximum field size exceeded")
-                            if \$p6.{$name}.elems > {$frname}___maxof;
-                        EOPI
-                    my $c2p_len = $p{$frname}.c2p_code;
-                    if $c2p_len ~~ s/^.*?\"$frname\"\s*\,// {
-                        $p{$frname}.c2p_code = qq:to<EOC1>;
-                            # No p6 attribute $frname to init but may need value in place
-                            my \${$frname}___inplace = $c2p_len;
-                            EOC1
-                    }
-                    else {
-                        $c2p_len = "";
-                        $p{$frname}.c2p_code = "# No p6 attribute $frname to init";
-                    }
-                    if $p{$frname}.c_attr ~~ /^\#/ {
-                       my $lc = "self.{$name}.elems";
-                       if $p{$frname}.p2c_code ~~
-                           /\$\.$frname <!before <alpha>|\d>/ {
-                           $p{$frname}.p2c_code ~~
-                               s:g/\$\.$frname <!before <alpha>|\d>/$lc/;
-                       }
-                    }
-                    else {
-                       $p{$frname}.p2c_init ~= "\n\$\!$frname = \$p6.{$name}.elems;"
-                    }
+		    my $c2p_len =
+                    glean_item_count($p, $name, $frname, ".elems");
+
                     $p{$frname}.c2p_arg = |();
                     $p{$name}.c_attr = "# Dynamic layout: {$type}s";
                     $p{$name}.p_attr = "has \@.$name is rw;";
@@ -1534,13 +1483,8 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                     # Go back and remove the _len field from perl6 attributes
                     $p{$frname}.p_attr = "# $frname not needed in P6 object";
 
-                    $p{$frname}.p2c_init = qq:to<EOPC>;
-                        my \${$frname}___sizeof = \$p6.{$name}.elems;
-                        die ("Maximum field size exceeded")
-                            if \${$frname}___sizeof > {$frname}___maxof;
-                        \$\!$frname = \${$frname}___sizeof;
-                        EOPC
-                    $p{$frname}.c2p_arg = |();
+                    glean_item_count($p, $name, $frname, ".elems");
+
                     $p{$name}.c_attr = "# Dynamic layout: {$type}s";
                     $p{$name}.p_attr = "has \@.$name is rw;";
                     $p{$name}.p2c_code = qq:to<EOCC>;
@@ -1561,13 +1505,8 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                     # Go back and remove the _len field from perl6 attributes
                     $p{$frname}.p_attr = "# $frname not needed in P6 object";
 
-                    $p{$frname}.p2c_init = qq:to<EOPC>;
-                        my \${$frname}___sizeof = \$p6.{$name}.elems;
-                        die ("Maximum field size exceeded")
-                            if \${$frname}___sizeof > {$frname}___maxof;
-                        \$\!$frname = \${$frname}___sizeof;
-                        EOPC
-                    $p{$frname}.c2p_arg = |();
+                    glean_item_count($p, $name, $frname, ".elems");
+
                     $p{$name}.c_attr = "# Dynamic layout: {$type}s";
                     $p{$name}.p_attr = "has \@.$name is rw;";
                     $p{$name}.p2c_code = qq:to<EOCC>;
