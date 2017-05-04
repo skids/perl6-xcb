@@ -876,7 +876,9 @@ sub build_equation($f) {
     # Fight cheeze with cheeze. This goes away in later xcbxml.
     if $f.gist ~~ /:s auto align pad after the list/ and
         +$f.elements(:TAG<fieldref>, :RECURSE) == 1 {
-            '$pstruct.' ~ $f.elements(:TAG<fieldref>, :RECURSE)[0].contents.Str;
+            '($pstruct.'
+            ~ $f.elements(:TAG<fieldref>, :RECURSE)[0].contents.Str
+            ~ ')';
     }
     else {
         build_op($f.elements[0]);
@@ -1158,10 +1160,15 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                 elsif $type eq any <char STRING8> {
                     if $eq ~~ /pstruct\.<!before [length|name_len] <!alpha>>/ {
                         $TODOP6++;
-                        $p{$name}.c_attr = "# Dynamic layout: {$type}s $TODOP6 fields other than .length";
+                        $p{$name}.c_attr = "# Dynamic layout: {$type}s $TODOP6 length depends on more than one field";
                     } else {
                         $p{$name}.c_attr = "# Dynamic layout: {$type}s";
                     }
+
+                    if $eq ~~ /pstruct\.<!before [length] <!alpha>>(<ident>)/ {
+		        glean_item_count($p, $name, $/[0].Str, ".encode('utf8').bytes");
+                    }
+
                     $p{$name}.p_attr = "has \$.$name is rw;";
                     $p{$name}.p2c_code = qq:to<EOCC>;
                         given \$\.{$name}.encode('utf8') \{
