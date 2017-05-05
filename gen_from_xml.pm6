@@ -885,6 +885,90 @@ sub build_equation($f) {
     }
 }
 
+multi sub reverse_op($accum, $e) {
+    "TODOP6: punting on unknown formula $e";
+}
+multi sub reverse_op($accum, $e where {
+                                $e.name eq "unop" and
+                                $e.elements[0].name eq "fieldref"}) {
+    given $e.attribs<op> {
+        when "-" { "-($accum)" }
+	default { "TODOP6: unhandled (XX $_ fieldref) -- accum $accum" }
+    }
+}
+multi sub reverse_op($accum, $e where
+                         { $e.name eq "op" and
+                           $e.elements[0].name eq any <value unop op> and
+                           $e.elements[1].name eq any <value unop op> and
+                           +$e.elements[0].elements(:TAG<fieldref>, :RECURSE)
+                         }) {
+    return "TODOP6: more than one fieldref"
+        if +$e.elements[1].elements(:TAG<fieldref>, :RECURSE);
+    my $newaccum = do given $e.attribs<op> {
+        when "-" { "($accum) + (" ~ build_op($e.elements[1]) ~ ")" }
+        when "+" { "($accum) - (" ~ build_op($e.elements[1]) ~ ")" }
+        when "*" { "($accum) div (" ~ build_op($e.elements[1]) ~ ")" }
+        when "/" { "($accum) * (" ~ build_op($e.elements[1]) ~ ")" }
+	default { "TODOP6: unhandled (fieldref $_ XX) -- accum $accum" }
+    };
+    reverse_op($newaccum, $e.elements[0]);
+}
+multi sub reverse_op($accum, $e where
+                         { $e.name eq "op" and
+                           $e.elements[1].name eq any <value unop op> and
+                           $e.elements[0].name eq any <value unop op> and
+                           +$e.elements[1].elements(:TAG<fieldref>, :RECURSE)
+                         }) {
+    return "TODOP6: more than one fieldref"
+        if +$e.elements[0].elements(:TAG<fieldref>, :RECURSE);
+    my $newaccum = do given $e.attribs<op> {
+        when "-" { "-(($accum) - (" ~ build_op($e.elements[1]) ~ "))" }
+        when "+" { "($accum) - (" ~ build_op($e.elements[1]) ~ ")" }
+        when "*" { "($accum) div (" ~ build_op($e.elements[1]) ~ ")" }
+        when "/" { "(" ~ build_op($e.elements[1]) ~ ") div ($accum)" }
+	default { "TODOP6: unhandled (XX $_ fieldref) -- accum $accum" }
+    }
+    reverse_op($newaccum, $e.elements[1]);
+}
+multi sub reverse_op($accum, $e where {
+                                $e.name eq "op" and
+                                $e.elements[1].name eq "fieldref"}) {
+    return "TODOP6: more than one fieldref"
+        if +$e.elements[0].elements(:TAG<fieldref>, :RECURSE);
+    given $e.attribs<op> {
+        when "-" { "-(($accum) - (" ~ build_op($e.elements[1]) ~ "))" }
+        when "+" { "($accum) - (" ~ build_op($e.elements[1]) ~ ")" }
+        when "*" { "($accum) div (" ~ build_op($e.elements[1]) ~ ")" }
+        when "/" { "(" ~ build_op($e.elements[1]) ~ ") div ($accum)" }
+	default { "TODOP6: unhandled (XX $_ fieldref) -- accum $accum" }
+    }
+}
+multi sub reverse_op($accum, $e where {
+                                .name eq "op" and
+                                .elements[0].name eq "fieldref"}) {
+    return "TODOP6: more than one fieldref"
+        if +$e.elements[1].elements(:TAG<fieldref>, :RECURSE);
+    given $e.attribs<op> {
+        when "-" { "($accum) + (" ~ build_op($e.elements[1]) ~ ")" }
+        when "+" { "($accum) - (" ~ build_op($e.elements[1]) ~ ")" }
+        when "*" { "($accum) div (" ~ build_op($e.elements[1]) ~ ")" }
+        when "/" { "($accum) * (" ~ build_op($e.elements[1]) ~ ")" }
+	default { "TODOP6: unhandled (fieldref $_ XX) -- accum $accum" }
+    }
+}
+multi sub reverse_op($accum, $e where { .name eq "value"}) {
+    $e.contents.Str;
+}
+multi sub reverse_op($accum, $e where { .name eq "fieldref"}) {
+    "TODOP6: extra fieldref $e.contents.Str prevents equation reversal ($accum)"
+}
+# given an equation with only one fieldref, try to reverse it to find
+# a value for the fieldref based on the length of the thing it was sizing.
+sub reverse_equation($f, $thing) {
+    return "TODOP6 Not one root op" if $f.elements».name.join(" ") ne any <op unop>;
+    reverse_op("($thing)", $f.elements[0]);
+}
+
 my %cstructs = "sync:INT64" => "Counter64", "Action" => "Action", "Behavior" => "Behavior", "NotifyData" => "NotifyData";
 
 sub c2p_parse_dynamic(params $p, $type) {
@@ -1191,7 +1275,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                         }
                         else {
                             $TODOP6++;
-                            $p{$name}.c_attr = "# Dynamic layout: {$type}s $TODOP6 fields other than .length.";
+                            $p{$name}.c_attr = "# Dynamic layout: {$type}s $TODOP6 fields Other than .length.";
                         }
                     } else {
                         $p{$name}.c_attr = "# Dynamic layout: {$type}s";
@@ -1245,9 +1329,38 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                                 EOPC
                             succeed;
                         }
-
+			if $eq !~~ /'+ ' (\d+)  ') +& (+^'  $0 ')'|' + ' (\d+) ') div ' <{$0+1}>\)|TODOP6/ {
+                            my $frname = $f.elements(:TAG<fieldref>, :RECURSE)[0].contents.Str;
+                            my $c2p_len =
+                                glean_item_count($p, $name, $frname, ".elems.\&\{{reverse_equation($f,'$_')}}");
+                            $p{$name}.c_attr = "# Dynamic layout: {$type}s";
+                            $p{$name}.p_attr = "has \@.$name is rw;";
+                            $p{$name}.p2c_code = qq:to<EOCC>;
+                                \@bufs.push: Blob[$nct].new(|\@.$name);
+                                EOCC
+                            $p{$name}.c2p_code = $c2p_len ?? qq:to<EOP1> !! qq:to<EOP2>;
+                                @args.append:
+                                    "$name",
+                                    (for 0..^\${$frname}___inplace \{
+                                        # XXX no assurance pointer math will not start adding by sizeof
+                                        die "Short Packet" unless \$left >= wiresize($nct);
+                                        NEXT \{ \$left -= wiresize($nct) };
+                                        nativecast(Pointer[{$nct}],Pointer.new(\$p + \$oleft - \$left)).deref;
+                                    });
+                                EOP1
+                                @args.append:
+                                    "$name",
+                                    (for 0..^($eq) \{
+                                        # XXX no assurance pointer math will not start adding by sizeof
+                                        die "Short Packet" unless \$left >= wiresize($nct);
+                                        NEXT \{ \$left -= wiresize($nct) };
+                                        nativecast(Pointer[{$nct}],Pointer.new(\$p + \$oleft - \$left)).deref;
+                                    });
+                                EOP2
+		            succeed
+                        }
                         $TODOP6++;
-                        $p{$name}.c_attr = "# Dynamic layout: {$type}s $TODOP6 fields other than .length $eq";
+                        $p{$name}.c_attr = "# Dynamic layout: {$type}s $TODOP6 fields other Than .length $eq";
                     } else {
                         $p{$name}.c_attr = "# Dynamic layout: {$type}s";
                     }

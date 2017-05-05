@@ -97,6 +97,7 @@ our %EnumValueExports =
     'Input::XIEventMask' => (:evmaskenums,),       # vs XProto
     'Input::ValuatorMode' => (:valuatorenums),     # vs Sync vs xkb
     'Input::Device' => (:deviceenums),             # vs XProto vs xkb
+    'Input::InputClass' => (:inputenums),          # vs XProto vs xkb
 
     'XProto::NotifyMode' => (:notifyenums,),
     'XProto::NotifyDetail' => (:notifyenums,),
