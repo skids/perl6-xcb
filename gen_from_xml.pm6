@@ -12,20 +12,42 @@ my $append_version; # Gets appended to extension version
 my %embeddable; # List of structs which are embeddable with HAS
 
 class param is rw {
+    #| original XCBXML element, if any
+    has $.xml;
+    #| basename of parameter
     has $.name;
-    has $.c_attr = |();
+    #| type from xml
     has $.c_type;
-    has $.c_offset = 0; # not a real offset, just correct alignmentwise
+    #| code defining constants for internal class use.
+    has $.c_const = |();
+
+    #| code defining cstruct member
+    has $.c_attr = |();
+    #| code defining Perl6 object attribute
     has $.p_attr = |();
+
     has $.p_subclasses = |();
+    #| documentation for cstruct attribute
     has $.c_doc = |();
+    #| documentation for Perl6 object attribute
     has $.p_doc = |();
+
+    #| code to create an argument from fixed offset packet data
     has $.c2p_arg = |();
+    #| code to initialize attributes from dynamic offset packet data
     has $.c2p_code = |();
+    #| code to initialize cstruct attributes based on Perl6 object
     has $.p2c_init = |();
+    #| code to add dynamically offset data based on Perl6 object
     has $.p2c_code = |();
+
+    #| code to handle sideband socket reception of file descriptors
     has $.fd_init = |();
+    #| code to handle sideband socket transmission of file descriptors
     has $.fd_send = |();
+
+    #| not a real offset, just correct for alignment purposes
+    has $.c_offset = 0;
 }
 
 # Need a light-duty ordered, autovivifying typed Associative?  Sinch.
@@ -49,11 +71,20 @@ class params does Associative {
     }
     has $.init_offset = 0;  # Length of top fields fixed up later
     has params $.parent;    # For nesting
-    has $.child_structs is rw = [];  # extra code at top of child_structs method
+    #| extra code at top of child_structs method
+    has $.child_structs is rw = [];
+    #| extra code at top of child_bufs method
+    has $.child_bufs_pre is rw = [];
+    #| extra code at bottom of child_bufs method
+    has $.child_bufs_post is rw = [];
     method find_param_owner ($name) {
         my $p = self;
         while $p.defined {
-            last if $p{$name}:exists;
+            last if
+                $p{$name}:exists and $p{$name}.c_type
+                or
+                # Implicit length field in top structure
+                $name eq "length" and not $p.parent.defined;
             $p = $p.parent;
         }
         $p;
@@ -215,7 +246,7 @@ class occlude {
     }
 
     method fixparams (params $p is rw, :$subclass?) {
-        if $.envelope =:= $.generic {
+        if $.envelope === $.generic {
             if $subclass.defined {
                 $p{$.typer}.p_attr = |();
                 $p{$.typer}.c2p_arg = |();
@@ -223,7 +254,7 @@ class occlude {
                 return;
             }
         }
-        return if $.envelope =:= $.generic or $subclass.defined;
+        return if $.envelope === $.generic or $subclass.defined;
 
         $p{$.typer}.p2c_init = "\$\!$.typer = +\$p6.$.typee.WHAT;";
         $p{$.typer}.p_attr = |();
@@ -237,7 +268,7 @@ class occlude {
     }
 
     method morphstructor () {
-        my $primerstruct = $.generic =:= $.class ??
+        my $primerstruct = $.generic === $.class ??
            '::?CLASS.WHO<cstruct>' !! "$.generic\.cstruct";
         qq:to<EOCC>;
             multi method new (Pointer \$p, Int :\$left! is rw, Bool :\$free = True) \{
@@ -333,6 +364,7 @@ class bitswitch {
     has $.xml;
     has $.casename;
     has $.prologue is rw;
+    has @.caseorder is rw;
     has @.cstructs is rw;
     has @.p6classes is rw;
     has $.epilogue is rw;
@@ -445,9 +477,11 @@ sub makemeth_child_bufs(params $p, :$indent = 0) {
 
     my $p2c_code = $p.params».p2c_code;
     with $p2c_code.first(*.chars) { qq:to<EOCB>.indent($indent) }
-        method child_bufs \{
+        method child_bufs (\$cstruct) \{
             my @bufs;
-        {$p2c_code.join("\n").indent($indent + 4)}
+        {$p.child_bufs_pre.unique.join("\n").indent(4)}
+        {$p2c_code.join("\n").indent(4)}
+        {$p.child_bufs_post.unique.join("\n").indent(4)}
             |@bufs;
         }
         EOCB
@@ -461,8 +495,8 @@ sub makemeth_child_structs(params $p, :$indent = 0) {
         method child_structs(Pointer \$p, \$pstruct, Real :\$left! is rw) \{
             my @args;
             my \$oleft = \$left;
-        {$p.child_structs.join("\n").indent($indent + 4)}
-        {$c2p_code.join("\n").indent($indent + 4)}
+        {$p.child_structs.unique.join("\n").indent(4)}
+        {$c2p_code.join("\n").indent(4)}
             |@args;
         }
         EOCS
@@ -479,6 +513,31 @@ sub makemeth_child_structs(params $p, :$indent = 0) {
 # turned into packet data.
 sub glean_item_count($p, $counted, $count, $how, :$revhow = "") {
 
+    # Find the field containing the length.
+    my $owner = $p.find_param_owner($count);
+    $owner<length>.name = "#implicit length" if $count eq "length";
+    my $cvar;
+    my $cval;
+
+    if $p !=== $owner {
+        # Direct use of field from parent structure.  Go back
+        # into the parent code and make a dynamic variable to
+        # carry it into our scope.
+        $cvar = $cval = "\$\*parent___$count";
+        $owner.child_structs.push:
+            "my $cvar = \$pstruct\.$count +& {$count}___maxof;";
+        $owner.child_bufs_pre.push: "my $cvar;";
+        $owner.child_bufs_post.push: qq:to<EOBP>;
+            die ("Maximum field size exceeded")
+                if $cval > {$count}___maxof;
+	    \$cstruct\.{$count} = $cval;
+            EOBP
+    }
+    else {
+        $cval = "(\$pstruct.$count +& {$count}___maxof)";
+        $cvar = "\$pstruct.$count";
+    }
+
     # Remove the length field from the Perl6 object attributes
     $p{$count}.p_attr = "# $count not needed in P6 object";
 
@@ -486,9 +545,9 @@ sub glean_item_count($p, $counted, $count, $how, :$revhow = "") {
     # count and do a sanity check that it will fit within the
     # range of its packet field.
     $p{$count}.p2c_init = qq:to<EOPC>;
-        my \${$count}___sizeof = \$p6.{$counted}$how;
+        my \${$count}___countof = \$p6.{$counted}$how;
         die ("Maximum field size exceeded")
-            if \${$count}___sizeof > {$count}___maxof;
+            if \${$count}___countof > {$count}___maxof;
         EOPC
 
     # Alter any code that appends arguments to the Perl6 object constructor
@@ -497,18 +556,37 @@ sub glean_item_count($p, $counted, $count, $how, :$revhow = "") {
     # code looks like.  If we do not, just delete that code and hope.
     my $c2p_len = $p{$count}.c2p_code ~ $revhow;
     if $c2p_len ~~ s/^.*?\"$count\"\s*\,// { # strip the '@args.append: "name",'
+        $c2p_len ~~ s:g/\$pstruct\.<ident>/$cval/;
         $p{$count}.c2p_code = qq:to<EOC1>;
             # No p6 attribute $count to init but may need value in place
             my \${$count}___inplace = $c2p_len;
             EOC1
     }
     else {
-        $c2p_len = "";
-        $p{$count}.c2p_code = "# No p6 attribute $count to init";
+        if $p !=== $owner {
+            $c2p_len = $cvar;
+            $p{$count}.c2p_code = qq:to<EOPO>;
+                # p6 attribute $count is in a parent object
+                EOPO
+	    $p.child_structs.push: "my \${$count}___inplace = $cval;";
+	    $p.child_bufs_pre.push: qq:to<EOBC>;
+	        with $cvar \{
+                    die ("Expected $cval elements")
+                    if self.{$counted}$how !== $cvar;
+                }
+                else \{
+                    $cvar = self.{$counted}$how;
+                }
+                EOBC
+        }
+        else {
+            $c2p_len = "";
+            $p{$count}.c2p_code = "# No p6 attribute $count to init";
+        }
     }
 
     # Alter the corresponding code used when creating packet data from
-    # a Perl6 object.  We have two scenarios: the ite count field is in
+    # a Perl6 object.  We have two scenarios: the item count field is in
     # the static (CStruct) part, or it is mixed in at a dynamic offset.
     # We can tell which from comments the code generator left for us.
     if $p{$count}.c_attr ~~ /:s outside cstruct/ { # dynamic offset
@@ -517,10 +595,94 @@ sub glean_item_count($p, $counted, $count, $how, :$revhow = "") {
         $p{$count}.p2c_code ~~ s:g/\$\.$count <!before <alpha>|\d>/$lc/;
     }
     else {
-        $p{$count}.p2c_init ~= "\n\$\!$count = \${$count}___sizeof;"
+        $p{$count}.p2c_init ~= "\n\$\!$count = \${$count}___countof;"
     }
 
     $p{$count}.c2p_arg = |();
+
+    $c2p_len;
+}
+
+# As above, but for arrays of arrays.
+sub glean_item_count_lol($p, $counted, $count) {
+
+    # Find the field containing the first dimension array
+    my $owner1 = $p.find_param_owner($count);
+    my $cv;
+    if $p !=== $owner1 { !!! } # No structure does this yet
+    else { $cv = "\$pstruct.$count" } # TODO: below code should use this
+
+    # Find the field containing the length of the first dimension.
+    my $countcount = $p{$count}.xml.elements(:TAG<fieldref>)[0].contents.Str;
+    my $owner = $p.find_param_owner($countcount);
+    my $countcountparm = $owner{$countcount};
+    my $countcountvar;
+    my $countcountval;
+
+    if $p !=== $countcountparm {
+        # Direct use of field from parent structure.
+        $countcountval = $countcountvar = "\$\*parent___$countcount";
+        if $p === $owner1 {
+            # ...and the first dimension is not in the parent structure,
+            # so it is on us to go back into the parent code and make a
+            # dynamic variable to carry it into our scope.
+            # XXX in future may not be safe to assume this is a uint
+            $owner.child_structs.push:
+                "my $countcountvar = \$pstruct\.$countcount +& {$countcount}___maxof;";
+            $owner.child_bufs_pre.push: "my $countcountvar;";
+            $owner.child_bufs_post.push: qq:to<EOBP>;
+                die ("Maximum field size exceeded")
+                    if $countcountval > {$countcount}___maxof;
+	        \$cstruct\.{$countcount} = $countcountvar;
+                EOBP
+        }
+        else { !!! } # No structure does this yet
+    }
+    else {
+        $countcountval = "(\$pstruct.$countcount +& {$countcount}___maxof)";
+        $countcountvar = "\$pstruct.$countcount";
+    }
+
+    # Remove the length field from the Perl6 object attributes
+    $p{$count}.p_attr = "# $count not needed in P6 object";
+
+    # Alter any code that appends arguments to the Perl6 object constructor
+    # so that it just supplies a local variable containing the item count.
+    # This is a bit tacky in that it assumes it knows exactly what that
+    # code looks like.  If we do not, just delete that code and hope.
+    my $c2p_len = $p{$count}.c2p_code;
+    if $c2p_len ~~ s/^.*?\"$count\"\s*\,// { # strip the '@args.append: "name",'
+        $c2p_len ~~ s:g/\$pstruct\.<ident>/$countcountval/;
+        $p{$count}.c2p_code = qq:to<EOC1>;
+            # No p6 attribute $count to init but may need value in place
+            my \@{$count}___inplace = $c2p_len;
+            EOC1
+    }
+    else {
+        $c2p_len = "";
+        $p{$count}.c2p_code = "# No p6 attribute $count to init";
+    }
+
+    $p{$count}.p2c_code = qq:to<EO2D>;
+        my constant {$count}___maxof =
+            2 ** (wiresize({NCtype($p{$count}.c_type)}) * 8) - 1;
+        my \@{$count}___sizeofs = self.{$counted}.map(*.elems);
+        die ("Maximum field size exceeded")
+            if any(\@{$count}___sizeofs) > {$count}___maxof;
+	with $countcountval \{
+            die ("Expected $countcountvar elements")
+                if +\@{$count}___sizeofs !== $countcountvar;
+        }
+        else \{
+            $countcountvar = +\@{$count}___sizeofs
+        }
+        \@bufs.push:
+            Buf[{NCtype($p{$count}.c_type)}].new(\@{$count}___sizeofs);
+        EO2D
+    $p{$count}.c2p_arg = |();
+
+    $p{$countcount}.p2c_code ~~ s:g/self\.$count/self\.$counted/;
+    $p{$countcount}.p2c_init ~~ s:g/\${$count}___countof/\${$counted}___countof/;
 
     $c2p_len;
 }
@@ -610,7 +772,7 @@ sub MakeMod ($xml) {
     } else {
         my $cheez;
 	for %X11::XCBquirks::EnumValueConst -> (:$key, :$value) {
-            next if $key =:= $value;
+            next if $key === $value;
 	    $cheez ~= "constant $key is export(:internal, :enums) = $value;\n"
 	}
         $prologue ~= qq:to<EOE>;
@@ -837,7 +999,7 @@ sub MakeImports($for, @mods) {
     }
     $for.prologue ~= $res;
 
-    for $for.occludes.grep({$_.generic !=:= $_.class}) {
+    for $for.occludes.grep({$_.generic !=== $_.class}) {
         $for.prologue ~= "class {$_.generic} \{...}\n"
     }
 }
@@ -871,8 +1033,9 @@ multi sub build_op($f where {.name eq "value"}) {
     $f.contents.Str;
 }
 
-sub build_equation($f) {
-    return "TODOP6 Not one root op" if $f.elements».name.join(" ") ne any <op unop>;
+sub build_equation($f is copy) {
+    return "TODOP6 Not one root op {$f.elements».name.join(' ')}"
+        if $f.elements».name.join(" ") ne any <op unop>;
     # Fight cheeze with cheeze. This goes away in later xcbxml.
     if $f.gist ~~ /:s auto align pad after the list/ and
         +$f.elements(:TAG<fieldref>, :RECURSE) == 1 {
@@ -995,26 +1158,28 @@ sub MakeSparseArray(params $p, $name, $type, $kfr) {
     my $keyfrob;
     my $keyparm;
     my $keyvar;
+    my $keyval;
 
     if ($kfr.name eq "fieldref") {
         $keyname = $kfr.contents.Str;
         my $owner = $p.find_param_owner($keyname);
         $keyparm = $owner{$keyname};
 
-        if $p !=:= $keyparm {
+        if $p !=== $keyparm {
             # Direct use of field from parent structure.  Go back
             # into the parent code and make a dynamic variable to
             # carry it into our scope.
-            $keyvar = "\$\*parent___$keyname";
+            $keyvar = $keyval = "\$\*parent___$keyname";
             $owner.child_structs.push:
-                "my $keyvar = \$pstruct\.$keyname;";
+                "my $keyvar = \$pstruct\.$keyname +& {$keyname}___maxof;";
 
         }
         else {
+            $keyval = "(\$\!$keyname +& {$keyname}___maxof)";
             $keyvar = "\$\!$keyname";
         }
 
-        $keyiter = "$keyvar\.polymod(2 xx *)";
+        $keyiter = "$keyval\.polymod(2 xx *)";
         $keyfrob = "$keyvar +|= +?\$_ +< \$++;";
         $p{$name}.p_attr =
             "has \@\.$name\[{(NCsizetype($keyparm.c_type) * 8)}];";
@@ -1024,14 +1189,16 @@ sub MakeSparseArray(params $p, $name, $type, $kfr) {
     $p{$name}.c_attr = "# Dynamic array $name sparsed by bits in $keyname";
     $p{$name}.p2c_code = "\@bufs.append: .bufs if .defined for \@\!$name;";
     $p{$name}.c2p_code = qq:to<EOKI>;
-        @args.append: \:$name\[(for $keyiter \{
-            if (\$_) \{
-        {c2p_parse_dynamic(params.new(:parent($p)), $type).indent(8)}
-            }
-            else \{
-                Nil
-            }
-        })];
+        @args.append:
+            "$name",
+            \[(for $keyiter \{
+                if (\$_) \{
+        {c2p_parse_dynamic(params.new(:parent($p)), $type).indent(12)}
+                }
+                else \{
+                    Nil
+                }
+            })];
         EOKI
     $p{$keyname}.c2p_arg = "# $keyname bitmaps definedness of \@\.$name.keys";
     $p{$keyname}.p2c_init ~= qq:to<EOKP>;
@@ -1066,8 +1233,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
             }
 
             if $dynsize {
-                $p{$name}.c_attr =
-                    "# $type \$.$name outside cstruct";
+                $p{$name}.c_attr = "# $type \$.$name outside cstruct";
                 $p{$name}.p2c_code = qq:to<EOPC>;
                     \{
                         my \$cl = class :: is repr("CStruct") \{
@@ -1135,7 +1301,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                     if $offset % NCsizetype($type);
                 $offset += NCsizetype($type);
 
-                $p{$name}.c_attr ~= qq:to<EOCA>;
+                $p{$name}.c_const = qq:to<EOCA>;
 
                 constant {$name}___maxof =
                     2 ** (wiresize({NCtype($type)}) * 8) - 1;
@@ -1175,6 +1341,28 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                 #
                 # Send it down to the padding case
                 proceed;
+            }
+	    if $f.elements».name.join eq "sumof" {
+                # An array of arrays.
+		my $d1 = $f.elements[0].attribs<ref>;
+                $p{$name}.xml = $f;
+                $p{$name}.c_type = $type;
+                $p{$name}.c_attr = "# \@.$name dynamic lol of $type outside cstruct";
+		glean_item_count_lol($p, $name, $d1);
+                $p{$name}.p_attr = "has \@.$name is rw;";
+		$p{$name}.c2p_code = qq:to<EOD2>;
+                    \@args.append:
+                        "$name",
+                        ( for \@{$d1}___inplace -> \$d1 \{
+                            [ for ^\$d1 \{
+                            { c2p_parse_dynamic($p, $type).indent(4) }
+                            }]
+                        });
+                    EOD2
+                $p{$name}.p2c_code = qq:to<EOC2>;
+                    \@bufs.append: (.bufs for \$.$name);
+                    EOC2
+                succeed;
             }
             if not +$f.elements or
                 $f.elements».name.join(" ") ne any <fieldref value> {
@@ -1242,6 +1430,8 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                     $p{$TODOP6}.p_attr = "# $TODOP6 complicated $_ ($eq) of {$f.attribs<type>}";
                 }
                 elsif $type eq any <char STRING8> {
+                    $p{$name}.c_type = $type;
+                    $p{$name}.xml = $f;
                     if $eq ~~ /pstruct\.<!before [length|name_len] <!alpha>>/ {
                         $TODOP6++;
                         $p{$name}.c_attr = "# Dynamic layout: {$type}s $TODOP6 length depends on more than one field";
@@ -1280,6 +1470,8 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                     } else {
                         $p{$name}.c_attr = "# Dynamic layout: {$type}s";
                     }
+                    $p{$name}.c_type = $type;
+                    $p{$name}.xml = $f;
                     $p{$name}.p_attr = "has \@.$name is rw;";
                     $p{$name}.p2c_code = qq:to<EOCC>;
                         \@bufs.push(\$_.bufs) for \$.$name;
@@ -1331,9 +1523,11 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                         }
 			if $eq !~~ /'+ ' (\d+)  ') +& (+^'  $0 ')'|' + ' (\d+) ') div ' <{$0+1}>\)|TODOP6/ {
                             my $frname = $f.elements(:TAG<fieldref>, :RECURSE)[0].contents.Str;
+                            $p{$name}.c_attr = "# Dynamic layout: {$type}s";
+                            $p{$name}.xml = $f;
+                            $p{$name}.c_type = $type;
                             my $c2p_len =
                                 glean_item_count($p, $name, $frname, ".elems.\&\{{reverse_equation($f,'$_')}}");
-                            $p{$name}.c_attr = "# Dynamic layout: {$type}s";
                             $p{$name}.p_attr = "has \@.$name is rw;";
                             $p{$name}.p2c_code = qq:to<EOCC>;
                                 \@bufs.push: Blob[$nct].new(|\@.$name);
@@ -1364,6 +1558,8 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                     } else {
                         $p{$name}.c_attr = "# Dynamic layout: {$type}s";
                     }
+                    $p{$name}.c_type = $type;
+                    $p{$name}.xml = $f;
                     $eq ~= "div wiresize($nct)" unless +$f.elements;
                     $p{$name}.p_attr = "has \@.$name is rw;";
                     $p{$name}.p2c_code = qq:to<EOCC>;
@@ -1422,6 +1618,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                     $p{$name}.c_attr = (for ^+$frval -> $i {
                         "has $nct \$.{$name}___pad$i;"
                     }).join("\n");
+                    $p{$name}.c_type = $type;
                     if $f.attribs<type> eq "char" {
                         $p{$name}.p2c_init = qq:to<EOCF>;
                             do given \$p6\.{$name}.encode('utf8') \{
@@ -1447,6 +1644,8 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                 }
                 if $f.attribs<type> eq "char" {
                     $p{$name}.c_attr ||= "# Dynamic layout: $name\[$frval] chars";
+                    $p{$name}.c_type = $f.attribs<type>;
+                    $p{$name}.xml = $f;
                     $p{$name}.p_attr = "has \$.$name is rw;";
                     $p{$name}.p2c_code = qq:to<EOCC> if $dynsize;
                     given \$\.{$name}.encode('utf8') \{
@@ -1467,6 +1666,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                     int8 int16 int32 int64 uint8 uint16 uint32 uint64 long
                     longlong bool size_t num32 num64
                 > {
+                    $p{$name}.c_type = $type;
                     $p{$name}.c_attr ||=
                         "# Dynamic layout: $name\[$frval] of $type";
                     $p{$name}.p_attr = "has \@.$name is rw;";
@@ -1488,10 +1688,12 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                     # XXX this is tacky -- for ImageText8
                     and !($name eq "string" and $p<x>:exists) {
 
-                    my $c2p_len =
-                    glean_item_count($p, $name, $frname, ".encode('utf8').bytes");
-
                     $p{$name}.c_attr = "# Dynamic layout: chars";
+                    $p{$name}.c_type = $f.attribs<type>;
+                    $p{$name}.xml = $f;
+                    my $c2p_len =
+                        glean_item_count($p, $name, $frname, ".encode('utf8').bytes");
+
                     $p{$name}.p_attr = "has \$.$name is rw;";
                     $p{$name}.p2c_code = qq:to<EOCC>;
                         given \$\.{$name}.encode('utf8') \{
@@ -1528,14 +1730,17 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
 
                     my $sz = $type eq "CHAR2B" ?? 2 !! 1;
 
+                    $p{$name}.c_attr = "# Dynamic layout: chars";
+                    $p{$name}.c_type = $f.attribs<type>;
+                    $p{$name}.xml = $f;
+
                     my $c2p_len =
-                    glean_item_count($p, $name, $frname, ".bytes div $sz", :revhow(" * $sz"));
+                        glean_item_count($p, $name, $frname, ".bytes div $sz", :revhow(" * $sz"));
 
                     # quietly for RT#131251
                     quietly $p{$frname}.p2c_init [R~]=
                         "die ('Oddly short buffer') if \$p6.{$name}.bytes % $sz;\n";
 
-                    $p{$name}.c_attr = "# Dynamic layout: chars";
                     $p{$name}.p_attr = "has \$.$name is rw;";
                     $p{$name}.p2c_code = qq:to<EOCC>;
                         given \$\.{$name} \{
@@ -1569,11 +1774,13 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                 > {
                     my $nct = NCtype($type);
 
-		    my $c2p_len =
-                    glean_item_count($p, $name, $frname, ".elems");
+                    $p{$name}.c_attr = "# Dynamic layout: {$type}s";
+                    $p{$name}.c_type = $type;
+                    $p{$name}.xml = $f;
+
+		    my $c2p_len = glean_item_count($p, $name, $frname, ".elems");
 
                     $p{$frname}.c2p_arg = |();
-                    $p{$name}.c_attr = "# Dynamic layout: {$type}s";
                     $p{$name}.p_attr = "has \@.$name is rw;";
                     $p{$name}.p2c_code = qq:to<EOCC>;
                         \@bufs.push: Blob[$nct].new(|\@.$name);
@@ -1582,7 +1789,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                         @args.append:
                             "$name",
                             (for 0..^\${$frname}___inplace \{
-                                    # XXX no assurance pointer math will not start adding by sizeof
+                                # XXX no assurance pointer math will not start adding by sizeof
                                 die "Short Packet" unless \$left >= wiresize($nct);
                                 NEXT \{ \$left -= wiresize($nct) };
                                 nativecast(Pointer[{$nct}],Pointer.new(\$p + \$oleft - \$left)).deref;
@@ -1591,7 +1798,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                         @args.append:
                             "$name",
                             (for 0..^\$pstruct.$frname \{
-                                    # XXX no assurance pointer math will not start adding by sizeof
+                                # XXX no assurance pointer math will not start adding by sizeof
                                 die "Short Packet" unless \$left >= wiresize($nct);
                                 NEXT \{ \$left -= wiresize($nct) };
                                 nativecast(Pointer[{$nct}],Pointer.new(\$p + \$oleft - \$left)).deref;
@@ -1603,45 +1810,69 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                     # Go back and remove the _len field from perl6 attributes
                     $p{$frname}.p_attr = "# $frname not needed in P6 object";
 
-                    glean_item_count($p, $name, $frname, ".elems");
-
                     $p{$name}.c_attr = "# Dynamic layout: {$type}s";
+                    $p{$name}.c_type = $type;
+                    $p{$name}.xml = $f;
+
+                    my $c2p_len = glean_item_count($p, $name, $frname, ".elems");
+
                     $p{$name}.p_attr = "has \@.$name is rw;";
                     $p{$name}.p2c_code = qq:to<EOCC>;
                         \@bufs.push(String.new(:name(\$_)).bufs) for \$.$name;
                         EOCC
-                    $p{$name}.c2p_code = qq:to<EOPC>;
-                    @args.append:
-                        "$name",
-                        (for 0..^\$pstruct.$frname \{
-                                # XXX no assurance pointer math will not start adding by sizeof
-                                String.new(Pointer.new(\$p + \$oleft - \$left),
-                                           :\$left, :!free).name;
-                            }
-                        );
-                    EOPC
+                    $p{$name}.c2p_code = $c2p_len ?? qq:to<EOP1> !! qq:to<EOP2>;
+                        @args.append:
+                            "$name",
+                            (for 0..^\${$frname}___inplace \{
+                                    # XXX no assurance pointer math will not start adding by sizeof
+                                    String.new(Pointer.new(\$p + \$oleft - \$left),
+                                               :\$left, :!free).name;
+                                }
+                            );
+                        EOP1
+                        @args.append:
+                            "$name",
+                            (for 0..^\$pstruct.$frname \{
+                                    # XXX no assurance pointer math will not start adding by sizeof
+                                    String.new(Pointer.new(\$p + \$oleft - \$left),
+                                               :\$left, :!free).name;
+                                }
+                            );
+                        EOP2
                 }
                 elsif %cstructs{$f.attribs<type>} -> $pt {
                     # Go back and remove the _len field from perl6 attributes
                     $p{$frname}.p_attr = "# $frname not needed in P6 object";
 
-                    glean_item_count($p, $name, $frname, ".elems");
-
                     $p{$name}.c_attr = "# Dynamic layout: {$type}s";
+                    $p{$name}.c_type = $type;
+                    $p{$name}.xml = $f;
+
+                    my $c2p_len = glean_item_count($p, $name, $frname, ".elems");
+
                     $p{$name}.p_attr = "has \@.$name is rw;";
                     $p{$name}.p2c_code = qq:to<EOCC>;
                         \@bufs.push(\$_.bufs) for \$.$name;
                         EOCC
-                    $p{$name}.c2p_code = qq:to<EOPC>;
-                    @args.append:
-                        "$name",
-                        (for 0..^\$pstruct.$frname \{
-                                # XXX no assurance pointer math will not start adding by sizeof
-                                $pt\.new(Pointer.new(\$p + \$oleft - \$left),
-                                         :\$left, :!free);
-                            }
-                        );
-                    EOPC
+                    $p{$name}.c2p_code = $c2p_len ?? qq:to<EOP1> !! qq:to<EOP2>;
+                        @args.append:
+                            "$name",
+                            (for 0..^\${$frname}___inplace \{
+                                    # XXX no assurance pointer math will not start adding by sizeof
+                                    $pt\.new(Pointer.new(\$p + \$oleft - \$left),
+                                             :\$left, :!free);
+                                }
+                            );
+                        EOP1
+                        @args.append:
+                            "$name",
+                            (for 0..^\$pstruct.$frname \{
+                                    # XXX no assurance pointer math will not start adding by sizeof
+                                    $pt\.new(Pointer.new(\$p + \$oleft - \$left),
+                                             :\$left, :!free);
+                                }
+                            );
+                        EOP2
                 }
                 else {
                     $TODOP6++;
@@ -1671,16 +1902,17 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
             my $type = $f.attribs<value-mask-type>;
             my $name = $f.attribs<value-mask-name>;
             my $pname = $f.attribs<value-list-name>;
+            $p{$name}.c_type = $type;
             $p{$name}.c_attr = qq:to<EOCT>;
                 has {NCtype($type)} \$.$name is rw;
-                constant {$name}___maxof =
-                    2 ** (wiresize({NCtype($type)}) * 8) - 1;
                 # Dynamic layout -- bit enabled fields
                 EOCT
-            $p{$name}.p_attr = qq:to<EOPT>;
-                # Perl6 object does not need attribute for $name
+            $p{$name}.c_const = qq:to<EOCO>;
                 constant {$name}___maxof =
                     2 ** (wiresize({NCtype($type)}) * 8) - 1;
+                EOCO
+            $p{$name}.p_attr = qq:to<EOPT>;
+                # Perl6 object does not need attribute for $name
                 has Any \%.$pname\{{$renum}Enum\::{$renum}} is rw;
                 EOPT
             $p{$name}.p2c_code = qq:to<EOPC>;
@@ -1793,11 +2025,14 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                 my $note = $not
                 ?? "# Dynamic layout -- bit enabled fields"
                 !! "# Dynamic layout -- bits here disable enabled fields";
+                $p{$name}.c_type = $type;
                 $p{$name}.c_attr = qq:to<EOCT>;
                      has {NCtype($type)} \$.$name is rw;
+                     $note
+                     EOCT
+                $p{$name}.c_const = qq:to<EOCT>;
                      constant {$name}___maxof =
                          2 ** (wiresize({NCtype($type)}) * 8) - 1;
-                     $note
                      EOCT
                 $p{$name}.p2c_init = qq:to<EOPI>;
                     \$\!{$name} = 0;
@@ -1811,16 +2046,12 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                     EOPI
                 if $not {
                     $p{$name}.p_attr = qq:to<EOPT>;
-                    constant {$name}___maxof =
-                        2 ** (wiresize({NCtype($type)}) * 8) - 1;
                     # We would like to use a parameterized SetHash here.
                     has Bool \%.$name\{{$renum}Enum\::{$renum}} is rw;
                     EOPT
                 }
                 else {
                     $p{$name}.p_attr = qq:to<EOPT>;
-                    constant {$name}___maxof =
-                        2 ** (wiresize({NCtype($type)}) * 8) - 1;
                     has \%.$name\{{$renum}Enum\::{$renum}} is rw;
                     EOPT
                 }
@@ -1836,17 +2067,17 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                     my constant \$formbits = (1 +< (max ({@types.map({NCtype($_)}).join(", ")}).map: \{ 8 * wiresize(\$_) })) - 1;
                     my \$f = $formula;
 
-                    my \$b;
-                    loop (\$b = 1; \$b < \$formbits; \$b +<= 1) \{
-                        next unless \$b +& \$f;
-                        for @names.grep({not %nots{$_}}).map({'$%.' ~ $_}).join(", ") \{
-                            if \$_\{{$renum}Enum\::{$renum}(\$b)}:exists \{
-                                die "Must be of type \{self.{$pname}_typemap\{\{{$renum}Enum\::{$renum}(\$b)}}.^name}"
-                                    unless (\$_\{{$renum}Enum\::{$renum}(\$b)}.isa(
-                                       self.{$pname}_typemap\{{$renum}Enum\::{$renum}(\$b)})
-                                    );
-                                @bufs.append: \$_\{{$renum}Enum\::{$renum}(\$b)}.bufs;
-                                last;
+                    for \@\.{$pname}_fieldorder -> \$b \{
+                        if \$b +& \$f \{
+                            for @names.grep({not %nots{$_}}).map({'$%.' ~ $_}).join(", ") \{
+                                if \$_\{{$renum}Enum\::{$renum}(\$b)}:exists \{
+                                    die "Must be of type \{\$\.{$pname}_typemap\{\{{$renum}Enum\::{$renum}(\$b)}}.^name}"
+                                        unless (\$_\{{$renum}Enum\::{$renum}(\$b)}.isa(
+                                            self.{$pname}_typemap\{{$renum}Enum\::{$renum}(\$b)})
+                                        );
+                                    @bufs.append: \$_\{{$renum}Enum\::{$renum}(\$b)}.bufs;
+                                    last;
+                                }
                             }
                         }
                     }
@@ -1860,15 +2091,14 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                     my constant \$formbits = (1 +< (max ({@types.map({NCtype($_)}).join(", ")}).map: \{ 8 * wiresize(\$_) })) - 1;
                     my \$f = $formula_c;
 
-                    my \$b;
                     @args.append: "{@names[0]}", Hash[Any,Any].new(
-                        (loop (\$b = 1; \$b < \$formbits; \$b +<= 1) \{
-                            next unless \$b +& \$f;
-                            \$_\{{$renum}Enum\::{$renum}(\$b)} =>
-                                \$pstruct.{$pname}_typemap\{{$renum}Enum\::{$renum}(\$b)}.new(
+                        |(for \@\.{$pname}_fieldorder -> \$b \{
+                            if \$b +& \$f \{
+                                {$renum}Enum\::{$renum}(\$b), # key
+                                \$\.{$pname}_typemap\{{$renum}Enum\::{$renum}(\$b)}.new(
                                     Pointer.new(\$p + \$oleft - \$left), :\$left, :!free
-                                )
-                        }))
+                                ) # value
+                            }}))
                 }
                 EOPC
         }
@@ -2100,6 +2330,8 @@ sub MakeErrors2($mod) {
             our class {$oname}{$clname}Error does Error[$number] is export(:DEFAULT, :errors) \{
                 my \$.error_code = $number; # without the extension base number
 
+            {$p.params».c_const.join("\n").indent(4)}
+
                 { @cstructs[*-1] }
 
                 has \$.sequence;
@@ -2301,6 +2533,8 @@ sub MakeEvents2($mod) {
             our class {$oname}{$clname}{$role} does $role\[$number] is export(:DEFAULT, :events) \{
                 my \$.event_code = $number; # without the extension base number
 
+                {$p.params».c_const.join("\n").indent(4)}
+
                 { @cstructs[*-1] }
 
                 has \$.sequence is rw;
@@ -2324,6 +2558,7 @@ sub MakeCases($bitswitch, $pp) {
     my @cstructs;
     my @p6classes;
     my @casemap;
+    my @caseorder;
     my $pname = $bitswitch.xml.attribs<name>;
 
     for $bitswitch.xml.elements(:TAG<bitcase>) -> $bitcase {
@@ -2380,7 +2615,7 @@ sub MakeCases($bitswitch, $pp) {
             {({ |(.c_doc, .c_attr) } for $p.params).join("\n").indent(8)}
                 my \$.cstruct = cpacking;
                 method bufs \{
-                    |self.child_bufs;
+                    |self.child_bufs(cpacking);
                 }
             EONC
 
@@ -2407,10 +2642,13 @@ sub MakeCases($bitswitch, $pp) {
             EO6O
 
         @casemap.push: "$ename => $clname";
+        @caseorder.push: "$ename";
 
         @p6classes.push(qq:to<EO6C>);
             {@doc.join("\n")}
             our class {$clname} does Struct$roles \{
+
+            {$p.params».c_const.join("\n").indent(4)}
 
                 { @cstructs[*-1] }
 
@@ -2426,10 +2664,14 @@ sub MakeCases($bitswitch, $pp) {
             EO6C
     }
     $bitswitch.cstructs.append(@cstructs);
+    $bitswitch.caseorder.append(@caseorder);
     @p6classes.push(qq:to<EOCH>);
         my \%.{$pname}_typemap := :\{
         { @casemap.join(",\n").indent(4) }
-        }
+        };
+	my \@.{$pname}_fieldorder := (
+        { @caseorder.join(",\n").indent(4) }
+        );
         EOCH
     $bitswitch.p6classes.append(@p6classes);
 }
@@ -2574,6 +2816,7 @@ sub MakeStructs($mod) {
                     EORC
                 @p6classes.push(qq:to<EO6C>);
                     our class {$o.cname} does Struct is MonoStructClass does {$o.prole_name}\[{$o.prole_val}] is export(:DEFAULT, :structs) \{
+                    {$p.params».c_const.join("\n").indent(4)}
                     { @cstructs[*-1] }
                     {({ |(.p_doc, .p_attr) } for $p.params).join("\n").indent(4)}
                     { makemeth_child_bufs($p, :indent(4)) }
@@ -2628,27 +2871,27 @@ sub MakeStructs($mod) {
         my @has = $p.params».c_attr;
         @cstructs.push: @has.first(/:i^^\s*has\s/) ?? qq:to<EOCS>
 
-                our class cstruct does cpacking is repr("CStruct") \{
+            our class cstruct does cpacking is repr("CStruct") \{
 
-            {({ |(.c_doc, .c_attr) } for $p.params).join("\n").indent(8)}
+            {({ |(.c_doc, .c_attr) } for $p.params).join("\n").indent(4)}
 
-                    method Hash \{
-                        \{
-            {$p.params».c2p_arg.join(",\n").indent(16)}
+                method Hash \{
+                    \{
+            {$p.params».c2p_arg.join(",\n").indent(12)}
                         }
-                    }
-                    method nativize(\$p6) \{
-            {$p.params».p2c_init.join("\n").indent(12)}
-                    }
+                }
+                method nativize(\$p6) \{
+            {$p.params».p2c_init.join("\n").indent(8)}
+                }
 
-                };
-                my \$.cstruct = cstruct;
+            };
+            my \$.cstruct = cstruct;
             EOCS
             !! qq:to<EONC>;
             {({ |(.c_doc, .c_attr) } for $p.params).join("\n").indent(8)}
                 my \$.cstruct = cpacking;
                 method bufs \{
-                    |self.child_bufs;
+                    |self.child_bufs(cpacking);
                 }
             EONC
 
@@ -2680,9 +2923,11 @@ sub MakeStructs($mod) {
             {@doc.join("\n")}
             our class {$clname} does Struct$roles$export \{
 
-                {$p.params».p_subclasses.join("\n").indent(4)}
+            {$p.params».c_const.join("\n").indent(4)}
 
-                { @cstructs[*-1] }
+            {$p.params».p_subclasses.join("\n").indent(4)}
+
+            { @cstructs[*-1].indent(4) }
 
             {({ |(.p_doc, .p_attr) } for $p.params).join("\n").indent(4)}
 
@@ -2784,9 +3029,8 @@ sub MakeReplies($mod) {
             $p<pad0_0>.c_attr = 'has uint8 $.pad0_0;' unless $p.params[0]:exists;
             $p.params.splice(1,0,
                 param.new(:name<sequence>,:c_attr('has uint16 $.sequence is rw;')),
-                param.new(:name<length>,:c_attr(
-                    'has uint32 $.length is rw;' ~ "\n" ~
-                    'constant length___maxof = 0xffffffff;' ~ "\n"))
+                param.new(:name<length>, :c_attr('has uint32 $.length is rw;')
+                          :c_const('constant length___maxof = 0xffffffff;'))
             );
             $p.params.unshift(
                  param.new(:name<response_type>,
@@ -2827,6 +3071,8 @@ sub MakeReplies($mod) {
                     does Reply[OpcodeEnum::Opcode({$req.attribs<opcode>})]
                     $flagroles
                     $export \{
+
+                {$p.params».c_const.join("\n").indent(4)}
 
                 {$p.params».p_subclasses.join("\n").indent(4)}
 
@@ -2898,18 +3144,16 @@ sub MakeRequests($mod) {
         }
         if $mod.extension {
             $p.params.unshift(
-                 param.new(:name<length>,:c_attr(
-                           'has uint16 $.length is rw;' ~ "\n" ~
-                           'constant length___maxof = 0xffff;' ~ "\n"))
+                 param.new(:name<length>, :c_attr('has uint16 $.length is rw;')
+                           :c_const('constant length___maxof = 0xffff;'))
             );
         }
         else {
             $p<pad0_0>.c_attr = 'has uint8 $.pad0_0;'
                 unless $p.params[0]:exists;
             $p.params.splice(1,0,
-                 param.new(:name<length>,:c_attr(
-                           'has uint16 $.length is rw;' ~ "\n" ~
-                           'constant length___maxof = 0xffff;' ~ "\n"))
+                 param.new(:name<length>,:c_attr('has uint16 $.length is rw;')
+                           :c_const('constant length___maxof = 0xffff;'))
                  );
         }
         my $oc = $req.attribs<opcode>;
@@ -2993,6 +3237,8 @@ sub MakeRequests($mod) {
                 $export \{
 
                 my \$.reply{ $isvoid ?? ";" !! " = " ~ $clname ~ "Reply" ~ ";" }
+
+                {$p.params».c_const.join("\n").indent(4)}
 
                 {$p.params».p_subclasses.join("\n").indent(4)}
 

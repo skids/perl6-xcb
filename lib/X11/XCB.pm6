@@ -25,7 +25,7 @@ our role cpacking is export(:internal) {
     #| Alignment up to which compilers add trailing padding to a C struct
     method calign {
         # It would be nice to get this to constant-fold... somehow...
-        state $ = max(|(calign($_.type) for ::?CLASS.^attributes))
+        state $ = max(1,|(calign($_.type) for ::?CLASS.^attributes))
     }
 }
 
@@ -347,7 +347,7 @@ our role Error[$error_code] is export(:internal) {
         nextsame;
     }
 
-    method child_bufs { |() }
+    method child_bufs ($cstruct) { |() }
     method child_structs(Pointer $p, $pstruct, Real :$left! is rw) { |() }
 
     method Buf {
@@ -360,7 +360,13 @@ our role Error[$error_code] is export(:internal) {
         $res;
     }
     method bufs {
-        self.Buf, |self.child_bufs;
+        # XXX This is not technically safe.  We want GC memory,
+        # and aliases into it, but GC memory can move anytime.
+        my $len = $.cstruct.wiresize;
+        my $res = Buf.new(0 xx $len);
+        my $c := nativecast($.cstruct, $res);
+        $c.nativize(self);
+        $res, |self.child_bufs($c);
     }
 
     method error_code($c) {
@@ -446,7 +452,7 @@ our role Event[$event_code] is export(:internal) {
         nextsame;
     }
 
-    method child_bufs { |() }
+    method child_bufs ($cstruct) { |() }
     method child_structs(Pointer $p, $pstruct, Real :$left! is rw) { |() }
 
     method Buf {
@@ -459,7 +465,13 @@ our role Event[$event_code] is export(:internal) {
         $res;
     }
     method bufs {
-        self.Buf, |self.child_bufs;
+        # XXX This is not technically safe.  We want GC memory,
+        # and aliases into it, but GC memory can move anytime.
+        my $len = $.cstruct.wiresize;
+        my $res = Buf.new(0 xx $len);
+        my $c := nativecast($.cstruct, $res);
+        $c.nativize(self);
+        $res, |self.child_bufs($c);
     }
 
     method event_code($c) {
@@ -542,7 +554,7 @@ our role XGEvent[$event_code] is export(:internal) {
         nextsame;
     }
 
-    method child_bufs { |() }
+    method child_bufs ($cstruct) { |() }
     method child_structs(Pointer $p, $pstruct, Real :$left! is rw) { |() }
 
     method Buf {
@@ -555,7 +567,13 @@ our role XGEvent[$event_code] is export(:internal) {
         $res;
     }
     method bufs {
-        self.Buf, |self.child_bufs;
+        # XXX This is not technically safe.  We want GC memory,
+        # and aliases into it, but GC memory can move anytime.
+        my $len = $.cstruct.wiresize;
+        my $res = Buf.new(0 xx $len);
+        my $c := nativecast($.cstruct, $res);
+        $c.nativize(self);
+        $res, |self.child_bufs($c);
     }
 
     method event_code($c) {
@@ -610,14 +628,17 @@ our role MonoStruct is export(:internal) {
     #| If no Pointer is provided, attributes may be initialized normally.
     multi method new (Pointer $p, Int :$left! is rw, Bool :$free = True) {
         my $oleft = $left;
-        my $cs = nativecast(Pointer[$.cstruct], $p).deref;
-        $left -= $.cstruct.wiresize;
-	fail("Short packet.") unless $left >= 0;
+        my $cs = { };
+        if $.cstruct.wiresize {
+            $cs = nativecast(Pointer[$.cstruct], $p).deref;
+            $left -= $.cstruct.wiresize;
+            fail("Short packet.") unless $left >= 0;
+        }
         my %childinits;
         for (|$cs.Hash.kv, |self.child_structs(Pointer[uint8].new(
                                    nativecast(Pointer[uint8], $p)
                                    + $.cstruct.wiresize
-                               ), $cs, :$left)) -> $k, \v {
+                               ), $.cstruct.wiresize ?? $cs !! $p, :$left)) -> $k, \v {
             use nqp;
             # XXX graceful way to decont without NQP or assuming listiness?
             %childinits{$k} := nqp::decont(v);
@@ -650,7 +671,7 @@ our role Struct is export(:internal) {
         nextsame;
     }
 
-    method child_bufs { |() }
+    method child_bufs ($cstruct) { |() }
     method child_structs(Pointer $p, $pstruct, Real :$left! is rw) { |() }
 
     method Buf {
@@ -663,7 +684,13 @@ our role Struct is export(:internal) {
         $res;
     }
     method bufs {
-        self.Buf, |self.child_bufs;
+        # XXX This is not technically safe.  We want GC memory,
+        # and aliases into it, but GC memory can move anytime.
+        my $len = $.cstruct.wiresize;
+        my $res = Buf.new(0 xx $len);
+        my $c := nativecast($.cstruct, $res);
+        $c.nativize(self);
+        $res, |self.child_bufs($c);
     }
 
 }
@@ -678,7 +705,7 @@ our role Reply [$opcode] is export(:internal) {
 
     method cstruct {...}
 
-    method child_bufs { |() }
+    method child_bufs ($cstruct) { |() }
     method child_structs(Pointer $p, $pstruct, Real :$left! is rw) { |() }
 
     method Buf {
@@ -692,9 +719,13 @@ our role Reply [$opcode] is export(:internal) {
     }
 
     method bufs {
-        my @bufs = self.Buf, self.child_bufs;
-        # XXX safe to use GC memory like this?
-        my $c := nativecast($.cstruct, @bufs[0]);
+        # XXX This is not technically safe.  We want GC memory,
+        # and aliases into it, but GC memory can move anytime.
+        my $len = $.cstruct.wiresize;
+        my $res = Buf.new(0 xx $len);
+        my $c := nativecast($.cstruct, $res);
+        $c.nativize(self);
+        my @bufs = $res, |self.child_bufs($c);
         my $length = [+] @bufs».bytes;
         die "BUG: absurd length of buffers"
             if $length > 0x3ffffffff;
@@ -767,7 +798,7 @@ our role Request [$opcode, $ext, $isvoid] is export(:internal) {
 
     method cstruct {...}
 
-    method child_bufs { |() }
+    method child_bufs ($cstruct) { |() }
     method child_structs(Pointer $p, $pstruct, Real :$left! is rw) { |() }
 
     method Buf {
@@ -781,9 +812,13 @@ our role Request [$opcode, $ext, $isvoid] is export(:internal) {
     }
 
     method bufs {
-        my @bufs = self.Buf, self.child_bufs;
-        # XXX safe to use GC memory like this?
-        my $c := nativecast($.cstruct, @bufs[0]);
+        # XXX This is not technically safe.  We want GC memory,
+        # and aliases into it, but GC memory can move anytime.
+        my $len = $.cstruct.wiresize;
+        my $res = Buf.new(0 xx $len);
+        my $c := nativecast($.cstruct, $res);
+        $c.nativize(self);
+        my @bufs = $res, |self.child_bufs($c);
         my $length = [+] @bufs».bytes;
         die "BUG: absurd length of buffers"
             if $length > 0x3ffff;

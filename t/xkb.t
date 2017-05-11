@@ -114,3 +114,22 @@ is (|(.values for $o.bufs)).flat[^2], (131,43), "Hand made PermamentOverlay1Beha
 is &Behavior(130), PermamentRadioGroupBehavior, "PermamentRadioGroupBehavior coercer with Int";
 is &Behavior(PermamentRadioGroupBehavior), PermamentRadioGroupBehavior, "Behavior coercer idempotence";
 is &Behavior()[1].gist, Pair.new("1",LockBehavior).gist, "Behavior list works";
+
+#my $c = Connection.new;
+
+#my $ue = UseExtensionRequest.new(:wantedMajor(1),:wantedMinor(0));
+#$ue.send($c);
+#my $rq = GetStateRequest.new(:deviceSpec(X11::XCB::xkb::IDEnum::UseCoreKbd));
+#my $rq = GetNamesRequest.new(:deviceSpec(X11::XCB::xkb::IDEnum::UseCoreKbd), :which(0x1));
+##                        :which(X11::XCB::xkb::NameDetailEnum::KTLevelNamesMask));
+##my $rq = SetDebuggingFlagsRequest.new(:affectFlags(1), :flags(1), :affectCtrls(1), :ctrls(1), :message<testfeefiefoo>);
+#$rq.perl.say;
+#
+#my $rp = $rq.send($c);
+#my $names = await($rp).receive;
+#
+#$names.perl.say;
+#
+CATCH { $_.message.say };
+
+
