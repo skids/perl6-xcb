@@ -16,7 +16,7 @@ class param is rw {
     has $.xml;
     #| basename of parameter
     has $.name;
-    #| type from xml
+    #| original name of type from xml
     has $.c_type;
     #| code defining constants for internal class use.
     has $.c_const = |();
@@ -69,14 +69,20 @@ class params does Associative {
         @.params .= grep(*.name ne $key);
         @res;
     }
-    has $.init_offset = 0;  # Length of top fields fixed up later
-    has params $.parent;    # For nesting
+
+    #| Length of top fields fixed up later
+    has $.init_offset = 0;
+    #| For nesting
+    has params $.parent;
     #| extra code at top of child_structs method
     has $.child_structs is rw = [];
     #| extra code at top of child_bufs method
     has $.child_bufs_pre is rw = [];
     #| extra code at bottom of child_bufs method
     has $.child_bufs_post is rw = [];
+
+    #| Search from here up parents for a parameter named $name.
+    #| For real parameters, .c_type will be set.
     method find_param_owner ($name) {
         my $p = self;
         while $p.defined {
@@ -92,24 +98,24 @@ class params does Associative {
 }
 
 # What trailing alignment would C use at this point?
-# Note we do not know if a larger field will come along,
-# but so far, it seems the XCBXML always is explicit in
-# places where this answer does not equal the intrastructure
-# alignment, though that may not be intentional.
+# Note we do not know if a larger field will come along, but so far,
+# it seems the XCBXML always is explicit in places where this answer
+# does not equal the normal intrastructure alignment, though that
+# may not be intentional.
 my sub c_alignment_rules($p) {
     ($p.init_offset, |(.c_offset for $p.params)).rotor(2 => -1).map(
         -> ($a, $b) {$b - $a}
     ).max;
 }
 
-# How to translate an occluded enum and its class to perl6 code,
+#| How to translate an occluded enum and its class to perl6 code,
 class ocmunge {
-    has $.cname;                  # name of the class
-    has $.cstruct;                # which role $.cstruct to use
-    # extra does when we are part of a ocrole (see below)
+    has $.cname;                  #| name of the class
+    has $.cstruct;                #| which role $.cstruct to use
+    #| extra "does" clause when we are part of a ocrole (see below)
     has $.sharedrole = $!cstruct eq $!cname ?? "" !! $!cstruct;
-    has $.prole_name;             # paramtric role for occlude
-    has $.prole_val;              # value to paramterize it with
+    has $.prole_name;             #| paramtric role for occlude
+    has $.prole_val;              #| value to parameterize it with
 }
 
 # A role shared by multiple union members.
@@ -150,20 +156,17 @@ class occlude {
         return "" if $!cstruct_done;
         $!cstruct_done = True;
 
+        qq:to<EOWS>
         $!needs_cstruct
-        ~
-        "class {$.class}::cstruct does cpacking is repr('CUnion') \{\n"
-        ~
-        ("HAS $_\:\:cstruct \$\.$_;" for @!cattrs).join("\n").indent(4)
-        ~
-        q:to<EOWS>
+        class {$.class}::cstruct does cpacking is repr('CUnion') \{
 
-            method wiresize {
-                state $ = max(|(wiresize($_.type) for ::?CLASS.^attributes))
+        {("HAS $_\:\:cstruct \$\.$_;" for @!cattrs).join("\n").indent(4)}
+
+            method wiresize \{
+                state \$ = max(|(wiresize(\$_.type) for \::?CLASS.^attributes))
             }
+        }
         EOWS
-        ~
-        "\n}\n";
     }
 
     # Generate map of subtype names to does clauses to add to them.
@@ -289,14 +292,17 @@ my %Occludes is default(|());
     $key => occlude.new(|%$value)
 };
 
+#| An instance of this corresponds to one file of generated Perl6
+#| code that stands alone as a compunit.  Usually it contains one
+#| extension, except for Xproto.pm6 which is not an extension.
 class mod {
-    has $.xml;
-    has $.cname;
-    has $.outname;
-    has $.modname;
-    has $.extension;
-    has $.xextension;
-    has $.prologue is rw;
+    has $.xml;              #| Top xml element of the module
+    has $.cname;            #| Name used in libxcb API
+    has $.outname;          #| Perl6 compunit filename
+    has $.modname;          #| Perl6 package/class name
+    has $.extension;        #| Extension name, usually source of .modname
+    has $.xextension;       #| Name X server uses to refer to the extension
+    has $.prologue is rw;   #| Very first contents of Perl6 compunit code
     has @.enums is rw;
     has %.renums is rw;
     has @.typedefs is rw;
@@ -360,14 +366,72 @@ class mod {
     }
 }
 
-class bitswitch {
-    has $.xml;
-    has $.casename;
-    has $.prologue is rw;
-    has @.caseorder is rw;
-    has @.cstructs is rw;
-    has @.p6classes is rw;
-    has $.epilogue is rw;
+#| Parse/gen state for one "switch" XML element
+class bitswitch is rw {
+    has $.xml;              #| The XML node defining the switch
+    has $.prologue;         #| Code before the generated class
+    has $.epilogue;         #| Code after the generated class
+    has $.c2pbits;          #| Expression to derive the bitfield from packet
+    has $.p2cbits;          #| Expression to derive the bitfield from object
+    has @.caseorder;        #| The names of cases ordered as they occur
+    has @.cstructs;         #| The static part of a case structure
+    has @.p6classes;        #| Perl6 object for a case structure
+    has @.fmeths;           #| Punch-through convenience methods
+    has $.keyenum;          #| Enum type of the switch keys
+    has $.yesbits;          #| Attributes containing affirmative switchbits
+
+    method p2ccode($pname) {
+        qq:to<EOPC>;
+            for \@\.{$pname}_fieldorder -> \$b \{
+                if \$b +& $!p2cbits \{
+                    for $!yesbits.join(", ") \{
+                        if \$_\{$!keyenum\(\$b)}:exists \{
+                            die "Must be of type \{\$\.{$pname}_typemap\{\{$!keyenum\(\$b)}}.^name}"
+                                unless (\$_\{$!keyenum\(\$b)}.isa(
+                                    self.{$pname}_typemap\{$!keyenum\(\$b)})
+                                );
+                            @bufs.append: \$_\{$!keyenum\(\$b)}.bufs;
+                            last;
+                        }
+                    }
+                }
+            }
+        EOPC
+    }
+
+
+    method punch_through($vl, $key, $attr, $type, :@not) {
+
+        # Maybe, prepare code to auto-clear bits in conflicting bitfields
+        my $nots = "";
+        $nots = qq:to<EODN> with @not;
+
+                               \$_\{$key}:delete for
+        {@not.join(",\n").indent(32)}
+        EODN
+	my $extradoc = "";
+        $extradoc = "\n#| Conflicting keys to autovivifications are cleared.";
+        qq:to<EOPT>
+	#| Direct access to an attribute in substructure \.$vl\{$key}
+        #| Setting any attribute using this may autovivify an object which has
+        #| other attributes that also need to be initalized\.$extradoc
+        #| To delete the key, assign $type to this, but
+        #| note that any attribute sharing this substructure will also be lost.
+        method $attr is rw \{
+            my $type \$v := \$\!$vl{$key} // $type;
+            Proxy.new(
+               :FETCH(-> \$ \{ \$v }),
+               :STORE(-> \$, \$val \{
+                   if \$val === $type \{ \$\!$vl{$key}:delete; }
+                   else \{
+                       with \$v \{ \$v.$attr = \$val  }
+                       else \{ \$v .= new($attr => \$val); $nots }
+                   }
+               })
+            );
+        }
+        EOPT
+    }
 }
 
 # Keep track of XML coverage during devel.
@@ -502,7 +566,6 @@ sub makemeth_child_structs(params $p, :$indent = 0) {
         EOCS
     else { "" }
 }
-
 
 # When a field is repesented in the Perl6 object as an object that
 # has an embedded item count (e.g. Str, Buf, or Array) and the
@@ -2060,29 +2123,12 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
             # Now build the list of optional fields
 	    my $cases = bitswitch.new(:xml($f));
             MakeCases($cases, params.new(:parent($p)));
+	    $cases.keyenum = $renum ~ 'Enum::' ~ $renum;
+	    $cases.yesbits = @names.grep({not %nots{$_}}).map({'$%.' ~ $_});
+            $cases.p2cbits = $formula;
+            $cases.c2pbits = $formula_c;
             $p{$pname}.p_subclasses = $cases.p6classes;
-
-            $p{@names[0]}.p2c_code = qq:to<EOPC>;
-                \{
-                    my constant \$formbits = (1 +< (max ({@types.map({NCtype($_)}).join(", ")}).map: \{ 8 * wiresize(\$_) })) - 1;
-                    my \$f = $formula;
-
-                    for \@\.{$pname}_fieldorder -> \$b \{
-                        if \$b +& \$f \{
-                            for @names.grep({not %nots{$_}}).map({'$%.' ~ $_}).join(", ") \{
-                                if \$_\{{$renum}Enum\::{$renum}(\$b)}:exists \{
-                                    die "Must be of type \{\$\.{$pname}_typemap\{\{{$renum}Enum\::{$renum}(\$b)}}.^name}"
-                                        unless (\$_\{{$renum}Enum\::{$renum}(\$b)}.isa(
-                                            self.{$pname}_typemap\{{$renum}Enum\::{$renum}(\$b)})
-                                        );
-                                    @bufs.append: \$_\{{$renum}Enum\::{$renum}(\$b)}.bufs;
-                                    last;
-                                }
-                            }
-                        }
-                    }
-                }
-                EOPC
+            $p{@names[0]}.p2c_code = $cases.p2ccode($pname);
 
 
             # TODO: multiple present fields... but nothing uses them

@@ -115,12 +115,46 @@ is &Behavior(130), PermamentRadioGroupBehavior, "PermamentRadioGroupBehavior coe
 is &Behavior(PermamentRadioGroupBehavior), PermamentRadioGroupBehavior, "Behavior coercer idempotence";
 is &Behavior()[1].gist, Pair.new("1",LockBehavior).gist, "Behavior list works";
 
+
+#my $fabnames = X11::XCB::xkb::GetNamesReply.new(sequence => 3, deviceID => 3, which => (
+#    NameDetail::KeycodesMask, ::GetNamesReply::valueList::NameDetail::KeycodesMask.new(keycodesName => 160),
+#    NameDetail::GeometryMask, ::GetNamesReply::valueList::NameDetail::GeometryMask.new(geometryName => 0),
+#    NameDetail::SymbolsMask, X11::XCB::xkb::GetNamesReply::valueList::NameDetail::SymbolsMask.new(symbolsName => 502),
+#    NameDetail::PhysSymbolsMask, X11::XCB::xkb::GetNamesReply::valueList::NameDetail::PhysSymbolsMask.new(physSymbolsName => 502),
+#    NameDetail::TypesMask, X11::XCB::xkb::GetNamesReply::valueList::NameDetail::TypesMask.new(typesName => 161),
+#    NameDetail::CompatMask, X11::XCB::xkb::GetNamesReply::valueList::NameDetail::CompatMask.new(compatName => 161),
+#    NameDetail::KeyTypeNamesMask, X11::XCB::xkb::GetNamesReply::valueList::NameDetail::KeyTypeNamesMask.new(typeNames => [162, 164, 167, 169, 171, 173, 174, 176, 177, 178, 179, 180, 181, 185, 192, 193, 198, 199, 200, 201, 202, 203, 204, 205, 208, 210]),
+#    NameDetail::KTLevelNamesMask, X11::XCB::xkb::GetNamesReply::valueList::NameDetail::KTLevelNamesMask.new(:ktLevelNames([[1], [2]], [3])),
+#    NameDetail::IndicatorNamesMask, X11::XCB::xkb::GetNamesReply::valueList::NameDetail::IndicatorNamesMask.new(
+#        :indicatorNames(1,2,3,4,5,6,7,8,9,10,11,12,Nil,14,15,16,17,18,19,20,21,21,23,24,25,26,27,28,29,30,31,32)),
+#    NameDetail::KeyNamesMask, X11::XCB::xkb::GetNamesReply::valueList::NameDetail::KeyNamesMask.new(
+#        :keyNames(X11::XCB::xkb::KeyName.new(name => "Kfee"),
+#                  X11::XCB::xkb::KeyName.new(name => "Kfie"))),
+#    NameDetail::KeyAliasesMask, X11::XCB::xkb::GetNamesReply::valueList::NameDetail::KeyAliasesMask.new(
+#        :keyAliases(X11::XCB::xkb::KeyAlias.new(real => "Kfoo", alias => "Kfum"))),
+#    NameDetail::VirtualModNamesMask, X11::XCB::xkb::GetNamesReply::valueList::NameDetail::VirtualModNamesMask.new(
+#        :virtualModNames(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16)),
+#    NameDetail::GroupNamesMask, X11::XCB::xkb::GetNamesReply::valueList::NameDetail::GroupNamesMask.new(
+#        :groups => (1,2,3,4,5,6,7,Nil))),
+#
+#    minKeyCode => 8,
+#    maxKeyCode => 45,
+#    nTypes => 26,
+#    groupNames => 3,
+#    virtualMods => 8191,
+#    firstKey => 8,
+#    nKeys => -8,
+#    indicators => 16383,
+#    nRadioGroups => 0,
+#    nKeyAliases => 33,
+#    nKTLevels => 96);
+
 #my $c = Connection.new;
 
 #my $ue = UseExtensionRequest.new(:wantedMajor(1),:wantedMinor(0));
 #$ue.send($c);
 #my $rq = GetStateRequest.new(:deviceSpec(X11::XCB::xkb::IDEnum::UseCoreKbd));
-#my $rq = GetNamesRequest.new(:deviceSpec(X11::XCB::xkb::IDEnum::UseCoreKbd), :which(0x1));
+#my $rq = GetNamesRequest.new(:deviceSpec(X11::XCB::xkb::IDEnum::UseCoreKbd), :which(0x1fff));
 ##                        :which(X11::XCB::xkb::NameDetailEnum::KTLevelNamesMask));
 ##my $rq = SetDebuggingFlagsRequest.new(:affectFlags(1), :flags(1), :affectCtrls(1), :ctrls(1), :message<testfeefiefoo>);
 #$rq.perl.say;
@@ -129,7 +163,7 @@ is &Behavior()[1].gist, Pair.new("1",LockBehavior).gist, "Behavior list works";
 #my $names = await($rp).receive;
 #
 #$names.perl.say;
-#
+
 CATCH { $_.message.say };
 
 
