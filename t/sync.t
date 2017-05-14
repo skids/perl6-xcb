@@ -31,8 +31,8 @@ $cookie = $qc.send($c);
 $qcr = await($cookie).receive;
 my $after = $qcr.counter_value;
 
-$before = ($before.hi +< 32) +| $before.lo;
-$after = ($after.hi +< 32) +| $after.lo;
+$before = (($before.hi +& 0xffffffff) +< 32) +| ($before.lo +& 0xffffffff);
+$after = (($after.hi +& 0xffffffff) +< 32) +| ($after.lo +& 0xffffffff);
 
 # TODO: get these test to run as fast as possible without flapping
 ok $after > $before, "Counter is running fast enough to try a trigger";
