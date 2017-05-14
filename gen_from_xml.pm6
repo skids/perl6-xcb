@@ -399,6 +399,19 @@ class bitswitch is rw {
         EOPC
     }
 
+    method c2pcode($switchname, $yesname) {
+        qq:to<EOCP>;
+        # TODO: multiple yes fields... but nothing uses them
+        @args.append: "$yesname", Hash[Any,Any].new(
+            |(for \@\.{$switchname}_fieldorder -> \$b \{
+                if \$b +& $!c2pbits \{
+                    $!keyenum\(\$b), # key
+                    \$\.{$switchname}_typemap\{$!keyenum\(\$b)}.new(
+                        Pointer.new(\$p + \$oleft - \$left), :\$left, :!free
+                    ) # value
+        }}));
+        EOCP
+    }
 
     method punch_through($vl, $key, $attr, $type, :@not) {
 
@@ -2129,24 +2142,8 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
             $cases.c2pbits = $formula_c;
             $p{$pname}.p_subclasses = $cases.p6classes;
             $p{@names[0]}.p2c_code = $cases.p2ccode($pname);
-
-
             # TODO: multiple present fields... but nothing uses them
-            $p{@names[0]}.c2p_code = qq:to<EOPC>;
-                \{
-                    my constant \$formbits = (1 +< (max ({@types.map({NCtype($_)}).join(", ")}).map: \{ 8 * wiresize(\$_) })) - 1;
-                    my \$f = $formula_c;
-
-                    @args.append: "{@names[0]}", Hash[Any,Any].new(
-                        |(for \@\.{$pname}_fieldorder -> \$b \{
-                            if \$b +& \$f \{
-                                {$renum}Enum\::{$renum}(\$b), # key
-                                \$\.{$pname}_typemap\{{$renum}Enum\::{$renum}(\$b)}.new(
-                                    Pointer.new(\$p + \$oleft - \$left), :\$left, :!free
-                                ) # value
-                            }}))
-                }
-                EOPC
+            $p{@names[0]}.c2p_code = $cases.c2pcode($pname, @names[0]);
         }
         when "doc" | "reply" {
             # Handled elsewhere
