@@ -504,6 +504,46 @@ class bitswitch is rw {
         EOCP
     }
 
+    method makebitfields($p) {
+        for |@!bitnames -> $name {
+            my $type = %!bittypes{$name};
+            my $note = %!yesno{$name}
+                ?? "# Dynamic layout -- bit enabled fields"
+                !! "# Dynamic layout -- bits here disable enabled fields";
+            $p{$name}.c_type = $type;
+            $p{$name}.c_attr = qq:to<EOCT>;
+                 has {NCtype($type)} \$.$name is rw;
+                 $note
+                 EOCT
+            $p{$name}.c_const = qq:to<EOCT>;
+                 constant {$name}___maxof =
+                     2 ** (wiresize({NCtype($type)}) * 8) - 1;
+                 EOCT
+            $p{$name}.p2c_init = qq:to<EOPI>;
+                \$\!{$name} = 0;
+                \{
+                    my \$b = 1;
+                    while \$b < {$name}___maxof \{
+                        \$\!{$name} +|= \$b
+                            if \$p6.$name\{$!keyenum\(\$b)}:exists;
+                        \$b +<= 1;
+                    };
+                }
+                EOPI
+            if %!yesno{$name} {
+                $p{$name}.p_attr = qq:to<EOPT>;
+                # We would like to use a parameterized SetHash here.
+                has Bool \%.$name\{$!keyenum} is rw;
+                EOPT
+            }
+            else {
+                $p{$name}.p_attr = qq:to<EOPT>;
+                has \%.$name\{$!keyenum} is rw;
+                EOPT
+            }
+        }
+    }
+
     method punch_through($vl, $key, $attr, $type, :@not) {
 
         # Maybe, prepare code to auto-clear bits in conflicting bitfields
@@ -2119,6 +2159,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
 
             my $enum = $f.elements(:TAG<bitcase>)[0].elements(:TAG<enumref>)[0].attribs<ref>;
             my $renum = mod.renum($f, $enum);
+	    $cases.keyenum = $renum ~ 'Enum::' ~ $renum;
 
             # Figure out what previous fields hold presence bits.
 	    with $cases.sussfields($parent) {
@@ -2130,46 +2171,10 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                 succeed;
             }
 
-            for |$cases.bitnames -> $name {
-                my $type = $cases.bittypes{$name};
-		my $note = $cases.yesno{$name}
-                ?? "# Dynamic layout -- bit enabled fields"
-                !! "# Dynamic layout -- bits here disable enabled fields";
-                $p{$name}.c_type = $type;
-                $p{$name}.c_attr = qq:to<EOCT>;
-                     has {NCtype($type)} \$.$name is rw;
-                     $note
-                     EOCT
-                $p{$name}.c_const = qq:to<EOCT>;
-                     constant {$name}___maxof =
-                         2 ** (wiresize({NCtype($type)}) * 8) - 1;
-                     EOCT
-                $p{$name}.p2c_init = qq:to<EOPI>;
-                    \$\!{$name} = 0;
-                    \{
-                        my \$b = 1;
-                        while \$b < {$name}___maxof \{
-                            \$\!{$name} +|= \$b if \$p6.$name\{{$renum}Enum\::{$renum}(\$b)}:exists;
-                            \$b +<= 1;
-                        };
-                    }
-                    EOPI
-                if $cases.yesno{$name} {
-                    $p{$name}.p_attr = qq:to<EOPT>;
-                    # We would like to use a parameterized SetHash here.
-                    has Bool \%.$name\{{$renum}Enum\::{$renum}} is rw;
-                    EOPT
-                }
-                else {
-                    $p{$name}.p_attr = qq:to<EOPT>;
-                    has \%.$name\{{$renum}Enum\::{$renum}} is rw;
-                    EOPT
-                }
-            }
+            $cases.makebitfields($p);
 
             # Now build the list of optional fields
             MakeCases($cases, params.new(:parent($p)));
-	    $cases.keyenum = $renum ~ 'Enum::' ~ $renum;
             $p{$switchname}.p_subclasses = $cases.p6classes;
             $p{$cases.yesno.keys[0]}.p2c_code = $cases.p2ccode($switchname);
             # TODO: multiple present fields... but nothing uses them
