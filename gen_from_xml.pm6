@@ -378,7 +378,98 @@ class bitswitch is rw {
     has @.p6classes;        #| Perl6 object for a case structure
     has @.fmeths;           #| Punch-through convenience methods
     has $.keyenum;          #| Enum type of the switch keys
-    has $.yesbits;          #| Attributes containing affirmative switchbits
+    has @.bitnames = [];    #| Atribute names of presence bits in packet order
+    has $.yesbits = [];     #| Attributes containing affirmative presence bits
+    has $.nobits = [];      #| Attributes containing negative presence bits
+    has %.bittypes;         #| Type of attributes in $.yesbits and $.nobits
+    has %.yesno;            #| Whether an attribute is in $.yesbits or $.nobits
+
+    # multisubs that builds bitops equations from XML "op"
+    # Note these only actually handles formulas like fee & (fie & (~foo & ~fum))
+    # ...because nothing so far encountered uses anything else
+    my multi sub formulize ($node where { $_.name eq "fieldref" }) {
+        [~] '([+|] %.', $node.contents.Str, '.keys)';
+    }
+    my multi sub formulize ($node where { $_.name eq "op" }) {
+        my constant %optrans := {'&' => ' +& ', '|' => ' +| '};
+        my $op = %optrans{$node.attribs<op>};
+        [~] "( ", (formulize($_) for $node.elements).join($op), " )";
+    }
+    my multi sub formulize (
+        $node where { $_.name eq "unop" and $_.attribs<op> eq '~' }) {
+        my $fr = $node.elements[0];
+        [~] "( {$fr.contents.Str}___maxof +^ ", |formulize($fr), " )";
+    }
+    # ...and one for going the other direction
+    my multi sub formulize_c ($node where { $_.name eq "op" }) {
+        my constant %optrans := {'&' => ' +& ', '|' => ' +| '};
+        my $op = %optrans{$node.attribs<op>};
+        [~] "( ", (formulize_c($_) for $node.elements).join($op), " )";
+    }
+    my multi sub formulize_c (
+        $node where { $_.name eq "unop" and $_.attribs<op> eq "~" }) {
+        my $fr = $node.elements[0];
+        [~] "( {$fr.contents.Str}___maxof +^ ", |formulize_c($fr), " )";
+    }
+    my multi sub formulize_c ($node where { $_.name eq "fieldref" }) {
+        [~] '$pstruct.', $node.contents.Str;
+    }
+
+    method sussfields($parent) {
+        my @bf;
+        my @bxml;
+	# We assume the first element is either a fieldref or an op
+        # First find all the fieldrefs involved in presence.
+	my $fe = $.xml.elements(:FIRST);
+        if ($fe.name eq "fieldref") {
+            @bxml = $fe;
+            @bf = $fe.contents.Str;
+        }
+        else {
+            @bxml = $fe.elements(:TAG<fieldref>, :RECURSE).list;
+            @bf = (.contents.Str for @bxml);
+        }
+	# Next, get their type.
+        for @bf -> $bf {
+            if $parent.elements(:name($bf))[0] -> $e {
+                %.bittypes{$bf} = $e.attribs<type>;
+            }
+            else { !!! }; # Bit field is not on our level of structure
+        }
+	for @bxml Z @bf -> ($xml, $name) {
+	    @!bitnames.push($name);
+            # Note this is bad math, but is valid for our cases
+            if $xml.parent.name eq "unop" and $xml.parent.attribs<op> eq '~' {
+                %!yesno{$name} = True;
+                $!nobits.push('$%.' ~ $name);
+            }
+            else {
+                %!yesno{$name} = False;
+                $!yesbits.push('$%.' ~ $name);
+            }
+        }
+        my $fail;
+        for $fe.elements(:TAG<op>) {
+            if $_.attribs<op> ne '&' {
+                $fail = "unhandled switch op {$_.attribs<op>}";
+            }
+        }
+        for $fe.elements(:TAG<unop>) {
+            if $_.attribs<op> ne '~' {
+                return "unhandled switch op {$_.attribs<op>}";
+            }
+            elsif $_.elements(:FIRST).name ne "fieldref" {
+                return "unhandled unop in switch ({$_.elements(:FIRST).name})";
+            }
+        }
+        if $fe.name ne any <fieldref op> {
+            return "unknown switch syntax {$fe.name}";
+        }
+        return $fail if $fail;
+        $!p2cbits = formulize($fe);
+        $!c2pbits = formulize_c($fe);
+        return;
+    }
 
     method p2ccode($pname) {
         qq:to<EOPC>;
@@ -2022,83 +2113,26 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
         }
         when "switch" {
             $dynsize = True;
-            my $pname = $name;
-            my @names = ($f.elements(:FIRST).name eq "fieldref" ?? $f.elements(:FIRST).contents.Str
-                !! (.contents.Str for $f.elements(:FIRST).elements(:TAG<fieldref>, :RECURSE)));
+	    my $cases = bitswitch.new(:xml($f));
+            my $switchname = $name;
             my $parent = $f.parent;
-            my @types = ($parent.elements(:name($_))[0].attribs<type> for @names);
+
             my $enum = $f.elements(:TAG<bitcase>)[0].elements(:TAG<enumref>)[0].attribs<ref>;
-
             my $renum = mod.renum($f, $enum);
-            my %nots;
-            my $formula;
-            my $formula_c;
-            my @cases;
 
-            # Only handle formulas like fee & (fie & (~foo & ~fum)) for now.
-            # (Really, we are doing this all for one particular request, but hey,
-            #  maybe it will be useful for a future or unpublished extension)
-	    if +@names > 1 {
-                if $f.elements(:FIRST).name eq "op" {
-                    my multi sub formulize ($node where { $_.name eq "op" }) {
-                        my constant %optrans := {'&' => ' +& ', '|' => ' +| '};
-                        [~] "( ", (formulize($_) for $node.elements).join(%optrans{$node.attribs<op>}), " )";
-                    }
-                    my multi sub formulize ($node where { $_.name eq "unop" and $_.attribs<op> eq "~" }) {
-                        [~] "( {$node.elements[0].contents.Str}___maxof +^ ", |formulize($node.elements[0]), " )";
-                    }
-                    my multi sub formulize ($node where { $_.name eq "fieldref" }) {
-                        [~] '([+|] %.', $node.contents.Str, '.keys)';
-                    }
-
-                    my multi sub formulize_c ($node where { $_.name eq "op" }) {
-                        my constant %optrans := {'&' => ' +& ', '|' => ' +| '};
-                        [~] "( ", (formulize_c($_) for $node.elements).join(%optrans{$node.attribs<op>}), " )";
-                    }
-                    my multi sub formulize_c ($node where { $_.name eq "unop" and $_.attribs<op> eq "~" }) {
-                        [~] "( {$node.elements[0].contents.Str}___maxof +^ ", |formulize_c($node.elements[0]), " )";
-                    }
-                    my multi sub formulize_c ($node where { $_.name eq "fieldref" }) {
-                        [~] '$pstruct.', $node.contents.Str;
-                    }
-                    for $f.elements(:FIRST).elements(:TAG<op>) {
-                        if $_.attribs<op> ne '&' {
-                            $TODOP6++;
-                            $p{$TODOP6}.c_attr = "# $TODOP6 unhandled switch op {$_.attribs<op>} $pname/{@names} of {@types} from {$enum}/{$renum}";
-                            $p{$TODOP6}.p_attr = "# $TODOP6 unhandled switch op {$_.attribs<op>} $pname/{@names} of {@types} from {$enum}/{$renum}";
-                            succeed;
-                        }
-                    }
-                    for $f.elements(:FIRST).elements(:TAG<unop>) {
-                        if $_.attribs<op> ne '~' or $_.elements(:FIRST).name ne "fieldref" {
-                            $TODOP6++;
-                            $p{$TODOP6}.c_attr = "# $TODOP6 unhandled switch op {$_.attribs<op>} $pname/{@names} of {@types} from {$enum}/{$renum}";
-                            $p{$TODOP6}.p_attr = "# $TODOP6 unhandled switch op {$_.attribs<op>} $pname/{@names} of {@types} from {$enum}/{$renum}";
-                            succeed;
-                        }
-                    }
-                    $formula = formulize($f.elements(:FIRST));
-                    $formula_c = formulize_c($f.elements(:FIRST));
-                }
-                else {
-                    $TODOP6++;
-                    $p{$TODOP6}.c_attr = "# $TODOP6 unknown switch syntax $pname/{@names} of {@types} from {$enum}/{$renum}";
-                    $p{$TODOP6}.p_attr = "# $TODOP6 unknown switch syntax $pname/{@names} of {@types} from {$enum}/{$renum}";
-                    succeed;
-                }
-            }
-            else {
-                $formula = [~] ' ([+|] %.', @names[0], '.keys)';
-                $formula_c = '$pstruct.' ~ @names[0];
-            }
-	    for @names -> $name {
-                my $unop = $f.elements(:TAG<fieldref>, :RECURSE).first({$_.contents.Str eq $name}).parent;
-                %nots{$name} = (so ($unop.name eq "unop") and ($unop.attribs<op> eq '~'));
+            # Figure out what previous fields hold presence bits.
+	    with $cases.sussfields($parent) {
+                # Something went wrong.
+                $TODOP6++;
+		my $dump = "$switchname from {$enum}/{$renum}";
+                $p{$TODOP6}.c_attr = "# $TODOP6 $_ $dump";
+                $p{$TODOP6}.p_attr = "# $TODOP6 $_ $dump";
+                succeed;
             }
 
-            for @names Z @types -> ($name is copy, $type) {
-                my $not = %nots{$name};
-                my $note = $not
+            for |$cases.bitnames -> $name {
+                my $type = $cases.bittypes{$name};
+		my $note = $cases.yesno{$name}
                 ?? "# Dynamic layout -- bit enabled fields"
                 !! "# Dynamic layout -- bits here disable enabled fields";
                 $p{$name}.c_type = $type;
@@ -2120,7 +2154,7 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
                         };
                     }
                     EOPI
-                if $not {
+                if $cases.yesno{$name} {
                     $p{$name}.p_attr = qq:to<EOPT>;
                     # We would like to use a parameterized SetHash here.
                     has Bool \%.$name\{{$renum}Enum\::{$renum}} is rw;
@@ -2134,16 +2168,12 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
             }
 
             # Now build the list of optional fields
-	    my $cases = bitswitch.new(:xml($f));
             MakeCases($cases, params.new(:parent($p)));
 	    $cases.keyenum = $renum ~ 'Enum::' ~ $renum;
-	    $cases.yesbits = @names.grep({not %nots{$_}}).map({'$%.' ~ $_});
-            $cases.p2cbits = $formula;
-            $cases.c2pbits = $formula_c;
-            $p{$pname}.p_subclasses = $cases.p6classes;
-            $p{@names[0]}.p2c_code = $cases.p2ccode($pname);
+            $p{$switchname}.p_subclasses = $cases.p6classes;
+            $p{$cases.yesno.keys[0]}.p2c_code = $cases.p2ccode($switchname);
             # TODO: multiple present fields... but nothing uses them
-            $p{@names[0]}.c2p_code = $cases.c2pcode($pname, @names[0]);
+            $p{$cases.yesno.keys[0]}.c2p_code = $cases.c2pcode($switchname, $cases.yesno.keys[0]);
         }
         when "doc" | "reply" {
             # Handled elsewhere
