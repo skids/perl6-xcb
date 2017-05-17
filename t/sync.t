@@ -3,7 +3,7 @@ use lib <blib/lib lib>;
 
 use Test;
 
-plan 7;
+plan 14;
 
 use X11;
 use X11::XCB::Sync;
@@ -34,6 +34,22 @@ my $after = $qcr.counter_value;
 $before = (($before.hi +& 0xffffffff) +< 32) +| ($before.lo +& 0xffffffff);
 $after = (($after.hi +& 0xffffffff) +< 32) +| ($after.lo +& 0xffffffff);
 
+my $alarmid = Resource.new(:from($c));
+my $car = CreateAlarmRequest.new(:id($alarmid.value), :value_mask(
+    CAEnum::Counter, CreateAlarmRequest::value_list::CA::Counter.new(:counter(4242)),
+    CAEnum::ValueType, CreateAlarmRequest::value_list::CA::ValueType.new(:valueType(VALUETYPEEnum::Absolute)),
+    CAEnum::TestType, CreateAlarmRequest::value_list::CA::TestType.new(:testType(TESTTYPEEnum::PositiveComparison)),
+    CAEnum::Events, CreateAlarmRequest::value_list::CA::Events.new(:events(1))
+    ));
+
+is $car.counter, $car.value_mask{CAEnum::Counter}.counter, "punch through method read access";
+lives-ok { $car.counter = 4343 }, "punch through method write access lives";
+is $car.counter, 4343, "punch through method write access worked";
+lives-ok { $car.counter = CreateAlarmRequest::value_list::CA::Counter }, "punch through method deletion mechanism lives";
+nok $car.value_mask{CAEnum::Counter}:exists, "punch through method deletion mechanism works";
+lives-ok { $car.counter = 4444 }, "punch through method autovivify mechanism lives";
+is $car.counter, 4444, "punch through method autovivify access worked";
+
 # TODO: get these test to run as fast as possible without flapping
 ok $after > $before, "Counter is running fast enough to try a trigger";
 if $after > $before {
@@ -42,14 +58,9 @@ if $after > $before {
     $dt += $after;
     my $at = Counter64.new(:hi($dt +> 32), :lo($dt +& 0xffffffff));
 
-    my $alarmid = Resource.new(:from($c));
-    my $car = CreateAlarmRequest.new(:id($alarmid.value), :value_mask(
-        CAEnum::Counter, CreateAlarmRequest::value_list::CA::Counter.new(:counter($st.counter)),
-        CAEnum::ValueType, CreateAlarmRequest::value_list::CA::ValueType.new(:valueType(VALUETYPEEnum::Absolute)),
-        CAEnum::Value, CreateAlarmRequest::value_list::CA::Value.new(:value($at)),
-        CAEnum::TestType, CreateAlarmRequest::value_list::CA::TestType.new(:testType(TESTTYPEEnum::PositiveComparison)),
-        CAEnum::Events, CreateAlarmRequest::value_list::CA::Events.new(:events(1))
-        ));
+    $car.counter = $st.counter;
+    $car.value = $at;
+
     my $w = Channel.new;
     $c.watch($w);
     my $oldc = $w.receive;

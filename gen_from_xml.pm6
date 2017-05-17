@@ -441,11 +441,11 @@ class bitswitch is rw {
             # Note this is bad math, but is valid for our cases
             if $xml.parent.name eq "unop" and $xml.parent.attribs<op> eq '~' {
                 %!yesno{$name} = True;
-                $!nobits.push('$%.' ~ $name);
+                $!nobits.push('$%!' ~ $name);
             }
             else {
                 %!yesno{$name} = False;
-                $!yesbits.push('$%.' ~ $name);
+                $!yesbits.push('$%!' ~ $name);
             }
         }
         my $fail;
@@ -544,32 +544,39 @@ class bitswitch is rw {
         }
     }
 
-    method punch_through($vl, $key, $attr, $type, :@not) {
+    method punchthrough($key, $attr, $type) {
+
 
         # Maybe, prepare code to auto-clear bits in conflicting bitfields
         my $nots = "";
-        $nots = qq:to<EODN> with @not;
+        $nots = qq:to<EODN> with |@$!nobits;
 
-                               \$_\{$key}:delete for
-        {@not.join(",\n").indent(32)}
+                           \$_\{$key}:delete for
+        {@$!nobits.join(",\n").indent(24)};
         EODN
 	my $extradoc = "";
-        $extradoc = "\n#| Conflicting keys to autovivifications are cleared.";
+        $extradoc = "\n#| Conflicting keys to autovivifications are cleared."
+            with |@$!nobits;
+	my $vl = $!yesbits[0];
         qq:to<EOPT>
-	#| Direct access to an attribute in substructure \.$vl\{$key}
+	#| Direct access to an attribute in substructure $vl\{$key}
         #| Setting any attribute using this may autovivify an object which has
         #| other attributes that also need to be initalized\.$extradoc
         #| To delete the key, assign $type to this, but
         #| note that any attribute sharing this substructure will also be lost.
         method $attr is rw \{
-            my $type \$v := \$\!$vl{$key} // $type;
+            my $type \$v := $vl\{$key} // $type;
             Proxy.new(
-               :FETCH(-> \$ \{ \$v }),
+               :FETCH(-> \$ \{ \$v.$attr }),
                :STORE(-> \$, \$val \{
-                   if \$val === $type \{ \$\!$vl{$key}:delete; }
+                   if \$val === $type \{ $vl\{$key}:delete; }
                    else \{
                        with \$v \{ \$v.$attr = \$val  }
-                       else \{ \$v .= new($attr => \$val); $nots }
+                       else \{
+                           $vl\{$key} := \$v.new($attr => \$val); $nots
+			   \$v := $vl\{$key};
+                           \$v.$attr;
+                       }
                    }
                })
             );
@@ -895,7 +902,10 @@ sub glean_item_count_lol($p, $counted, $count) {
 }
 
 # Special quirks and workarounds
-my %quirks = "ClientMessageData" => &makeClientMessageData, "list:preserve_entries" => &makeParasiticList, "list:preserve" => &makeParasiticList;
+my %quirks = "ClientMessageData" => &makeClientMessageData,
+             "list:preserve_entries" => &makeParasiticList,
+             "list:preserve" => &makeParasiticList,
+             "switch:replies" => &makeGBNDetail;
 
 sub MakeMod ($xml) {
     my $outname;
@@ -1407,6 +1417,7 @@ sub MakeSparseArray(params $p, $name, $type, $kfr) {
                 }
             })];
         EOKI
+    $p{$keyname}.p_attr = "# \@\.$name slots set bits of $keyname if full";
     $p{$keyname}.c2p_arg = "# $keyname bitmaps definedness of \@\.$name.keys";
     $p{$keyname}.p2c_init ~= qq:to<EOKP>;
         for \$p6\.$name\.map(*.defined) \{
@@ -2155,6 +2166,10 @@ sub MakeCStructField(params $p, $f, $padnum is rw, $dynsize is rw, $rw = " is rw
             $dynsize = True;
 	    my $cases = bitswitch.new(:xml($f));
             my $switchname = $name;
+	    if %quirks{"switch:$name"}:exists {
+                %quirks{"switch:$name"}($p, $f, :$padnum);
+                succeed
+            }
             my $parent = $f.parent;
 
             my $enum = $f.elements(:TAG<bitcase>)[0].elements(:TAG<enumref>)[0].attribs<ref>;
@@ -2740,10 +2755,17 @@ sub MakeCases($bitswitch, $pp) {
 
             }
             EO6C
+
+        for $p.params {
+            # TODO: cleanly lift the sigil and type into the param object.
+            next unless $_.p_attr ~~ /:i^^\s*has/;
+            $bitswitch.fmeths.push: $bitswitch.punchthrough($ename, $_.name, $clname);
+        }
     }
     $bitswitch.cstructs.append(@cstructs);
     $bitswitch.caseorder.append(@caseorder);
     @p6classes.push(qq:to<EOCH>);
+        {$bitswitch.fmeths.join("\n")}
         my \%.{$pname}_typemap := :\{
         { @casemap.join(",\n").indent(4) }
         };
@@ -3472,4 +3494,45 @@ sub makeClientMessageData($p, $f, *%_) {
         '$!cmd___pad3, $!cmd___pad4)'
         ~ "\n" ~
         '    = nativecast(CArray[uint32],$p6.data)[^5] ';
+}
+
+# The "replies" switch in xkbGetKbdByNameReply has other replies as values
+sub makeGBNDetail($p, $f, *%_) {
+    $p<replies>.c_attr = '# Special format: various replies follow here';
+    $p<replies>.p_attr = 'has %.replies is rw;';
+    $p<replies>.c2p_code = qq:to<EORC>;
+        @args.append: "replies", \{
+            (if \$pstruct.reported +&
+                ([+|] GBNDetailEnum::Types,
+                      GBNDetailEnum::ClientSymbols,
+                      GBNDetailEnum::ServerSymbols) \{
+                "map", GetMapReply.new(
+                    Pointer.new(\$p + \$oleft - \$left), :\$left, \:\!free)
+            }),
+            (if \$pstruct.reported +& GBNDetailEnum::CompatMap \{
+                "compat", GetCompatMapReply.new(
+                    Pointer.new(\$p + \$oleft - \$left), :\$left, \:\!free)
+            }),
+            (if \$pstruct.reported +& GBNDetailEnum::IndicatorMaps \{
+                "indicators", GetIndicatorMapReply.new(
+                    Pointer.new(\$p + \$oleft - \$left), :\$left, \:\!free)
+            }),
+            (if \$pstruct.reported +&
+                ([+|] GBNDetailEnum::KeyNames,
+                      GBNDetailEnum::OtherNames) \{
+                "names", GetNamesReply.new(
+                    Pointer.new(\$p + \$oleft - \$left), :\$left, \:\!free)
+            }),
+            # TODO: XCBXML currently does not actually define XkbGetGeometryReply
+            #(if \$pstruct.reported +& GBNDetailEnum::Geometry \{
+            #    "geometry", GetGeometryReply.new(
+            #        Pointer.new(\$p + \$oleft - \$left), :\$left, \:\!free)
+            #}),
+        }
+        EORC
+
+    $p<replies>.p2c_code = qq:to<EORP>;
+        # TODO: synthesis of replies bits is complicated and NYI
+        \{!!!}
+        EORP
 }
