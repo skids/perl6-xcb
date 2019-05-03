@@ -619,7 +619,7 @@ sub guess_xcbxml_version (IO::Path $dir, @xmlfiles) {
                                     "prior").join("."));
             }
             else {
-                $res = Version.new(($res.parts[0..^*], 0).join("."));
+                $res = Version.new(($res.parts[0..*], 0).join("."));
             }
         }
     }
@@ -2582,7 +2582,7 @@ sub MakeEvents2($mod) {
 
                     has uint8 \$.response_type is rw;
             $lift.indent(8)
-            {({ |(.c_doc, .c_attr) } for $p.params[$start..^*]).join("\n").indent(8)}
+            {({ |(.c_doc, .c_attr) } for $p.params[$start..*]).join("\n").indent(8)}
 
                     method Hash \{
                         \{
@@ -3126,7 +3126,7 @@ sub MakeReplies($mod) {
                 $p<nfd>.p_attr = "has \$.nfd is rw = $nfds;";
                 $p<nfd>.c_attr = "has uint8 \$.nfd is rw = $nfds;";
             }
-            $p<pad0_0>.c_attr = 'has uint8 $.pad0_0;' unless $p.params[0]:exists;
+            unless ($p.params[0]:exists) { $p<pad0_0>.c_attr = 'has uint8 $.pad0_0;' }
             $p.params.splice(1,0,
                 param.new(:name<sequence>,:c_attr('has uint16 $.sequence is rw;')),
                 param.new(:name<length>, :c_attr('has uint32 $.length is rw;')
